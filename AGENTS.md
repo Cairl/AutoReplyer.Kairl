@@ -45,9 +45,12 @@ pip install pyautogui pillow pywin32 winocr
 
 ## TUI Navigation
 
-- Arrow keys / Enter / Esc for navigation
-- Number keys (1-4) for quick main menu access
-- Single-letter shortcuts in group management (A/D/T/M/R)
+- Pure cursor navigation: Up/Down/Enter/Esc only
+- All operations via cursor navigation + Enter confirmation
+- Reply settings: Enter to edit inline, Enter to confirm, Esc to cancel
+- Groups: Enter to open action sub-menu (toggle, set regions, delete)
+- Sub-menus for group actions: cursor navigation within overlay
+- Bottom hint bar: `[Up/Down] 导航    [Enter] 确认    [Esc] 返回`
 - Inline text editing for reply settings (supports Chinese via getwch)
 
 ## User Preferences

@@ -54,7 +54,6 @@ class C:
 TL, TR, BL, BR = "╭", "╮", "╰", "╯"
 ML, MR = "├", "┤"
 H, V = "─", "│"
-HD = "╌"  # dashed horizontal
 DIVIDER = f"{TL}{H * 58}{TR}"
 
 # ── Key codes (msvcrt returns bytes; arrow keys are prefixed with 0xe0) ──
@@ -94,22 +93,44 @@ def get_display_width(text: str) -> int:
 
 
 def box_line(content: str, width: int = 60) -> str:
-    """Create a bordered line with content padded to target inner width."""
-    inner_w = width - 4  # "│ " + content + " │"
+    """Create a bordered line with content padded to target inner width.
+    2-char indent after left │ border.
+    """
+    inner_w = width - 8  # "  │  " + content + "  │"
     vis = get_display_width(content)
     pad = max(0, inner_w - vis)
-    return f"  {C.GRAY}{V} {content}{' ' * pad} {C.GRAY}{V}{C.RESET}"
+    return f"  {C.GRAY}{V}  {content}{' ' * pad}  {C.GRAY}{V}{C.RESET}"
 
 
 def box_line_select(content: str, selected: bool, width: int = 60) -> str:
-    """Create a bordered line with optional selection highlight."""
-    inner_w = width - 4
+    """Create a bordered line with optional selection highlight.
+    2-char indent after left │ border.
+    """
+    inner_w = width - 8
     if selected:
         vis = get_display_width(content)
         pad = max(0, inner_w - vis)
-        return f"  {C.GRAY}{V}{C.RESET}{C.BG_SELECT}{C.BOLD} {content}{' ' * pad} {C.RESET}{C.GRAY}{V}{C.RESET}"
+        return f"  {C.GRAY}{V}  {C.RESET}{C.BG_SELECT}{C.BOLD}{content}{' ' * pad}{C.RESET}  {C.GRAY}{V}{C.RESET}"
     else:
         return box_line(content, width)
+
+
+def section_divider(title: str, width: int = 60) -> str:
+    """Create a divider line with title embedded: ─── 标题 ────────
+    2-char indent after left │ border, matching box_line.
+    """
+    inner_w = width - 8  # "  │  " + content + "  │"
+    if title:
+        title_part = f"─── {title} ───"
+        title_vis = 3 + 1 + get_display_width(title) + 1 + 3
+        remaining = max(0, inner_w - title_vis)
+        line_content = f"{title_part}{H * remaining}"
+    else:
+        line_content = f"{H * inner_w}"
+    content = f"{C.GRAY}{line_content}{C.RESET}"
+    vis = get_display_width(content)
+    pad = max(0, inner_w - vis)
+    return f"  {C.GRAY}{V}  {content}{' ' * pad}  {C.GRAY}{V}{C.RESET}"
 
 
 def clear_screen():
@@ -551,6 +572,12 @@ class TUI:
         self.group_modal_idx = 0
         self._ga_group_idx = -1
 
+        # Region-select wait-for-confirm state
+        self._region_wait_active = False
+        self._region_wait_msg = ""
+        self._region_wait_type = ""  # "message_region" or "reply_region"
+        self._region_wait_sel = 0
+
         # Rendering
         self._last_lines: list[str] = []
         self._term_w = 80
@@ -598,7 +625,10 @@ class TUI:
     # ── Incremental rendering ──
 
     def _render(self):
-        lines = self._render_main()
+        if self._region_wait_active:
+            lines = self._render_region_wait()
+        else:
+            lines = self._render_main()
 
         if not self._last_lines:
             clear_screen()
@@ -632,28 +662,25 @@ class TUI:
         title_text = "AutoReplyer.Kairl"
         title_prefix = f"─── {C.MAUVE}{C.BOLD}{title_text}{C.RESET}{C.GRAY} "
         prefix_vis = 4 + len(title_text) + 1  # "─── " + title + trailing space
-        remaining = max(0, W - 2 - prefix_vis)
+        remaining = max(0, W - prefix_vis - 4)
         lines.append(f"  {C.GRAY}{TL}{title_prefix}{H * remaining}{TR}{C.RESET}")
 
         # ── Monitor stats ──
         running_color = C.GREEN if s["running"] else C.RED
         status_text = "运行中" if s["running"] else "已停止"
-        lines.append(box_line(f"  {C.DIM}监控状态{C.RESET}    {running_color}{status_text}{C.RESET}", W))
+        lines.append(box_line(f" {C.DIM}监控状态{C.RESET}    {running_color}{status_text}{C.RESET}", W))
 
         counters = (
-            f"  {C.DIM}触发:{C.RESET} {C.YELLOW}{s['triggers']}{C.RESET}       "
+            f" {C.DIM}触发:{C.RESET} {C.YELLOW}{s['triggers']}{C.RESET}       "
             f"{C.DIM}回复:{C.RESET} {C.GREEN}{s['replies']}{C.RESET}       "
             f"{C.DIM}错误:{C.RESET} {C.RED}{s['errors']}{C.RESET}"
         )
         lines.append(box_line(counters, W))
-        lines.append(box_line(f"  {C.DIM}最后触发{C.RESET}     {C.WHITE}{s['last_trigger']}{C.RESET}", W))
-        lines.append(box_line(f"  {C.DIM}最后回复{C.RESET}     {C.WHITE}{s['last_reply']}{C.RESET}", W))
-
-        # ── Separator (plain dashed, no ├┤) ──
-        lines.append(box_line(f"  {C.GRAY}{HD * (W - 8)}{C.RESET}", W))
+        lines.append(box_line(f" {C.DIM}最后触发{C.RESET}     {C.WHITE}{s['last_trigger']}{C.RESET}", W))
+        lines.append(box_line(f" {C.DIM}最后回复{C.RESET}     {C.WHITE}{s['last_reply']}{C.RESET}", W))
 
         # ── Reply settings section ──
-        lines.append(box_line(f"  {C.TEAL}{C.BOLD}── 回复设置 ──{C.RESET}", W))
+        lines.append(section_divider("回复设置", W))
 
         reply_items = [
             ("回复内容",     self.config.get_reply("content", ""),         "str"),
@@ -667,21 +694,18 @@ class TUI:
             display_val = self._edit_buffer if editing else value
 
             if editing:
-                line = f"  {C.BOLD}{C.TEAL}[>]{C.RESET} {C.WHITE}{label}:{C.RESET} {C.YELLOW}{display_val}_"
+                line = f" ›{C.BOLD} {label}:{C.RESET} {C.YELLOW}{display_val}_{C.RESET}"
             elif sel:
                 line = f" ›{C.BOLD} {label}:{C.RESET} {C.GREEN}{value}{C.RESET}"
             else:
-                line = f"   {C.WHITE}{label}:{C.RESET} {C.WHITE}{value}{C.RESET}"
+                line = f"  {C.WHITE}{label}:{C.RESET} {C.WHITE}{value}{C.RESET}"
             lines.append(box_line(line, W))
 
-        # ── Separator ──
-        lines.append(box_line(f"  {C.GRAY}{HD * (W - 8)}{C.RESET}", W))
-
-        # ── Group management section ──
-        lines.append(box_line(f"  {C.TEAL}{C.BOLD}── 群管理 ──{C.RESET}", W))
+        # ── Group settings section ──
+        lines.append(section_divider("群设置", W))
 
         if not groups:
-            lines.append(box_line(f"  {C.DIM}(暂无群组配置){C.RESET}", W))
+            lines.append(box_line(f" {C.DIM}(暂无群组配置){C.RESET}", W))
         else:
             for i, group in enumerate(groups):
                 group_idx = 4 + i
@@ -707,7 +731,7 @@ class TUI:
 
                 status_str = " ".join(status_parts)
                 name = group["name"]
-                line = f"  {C.WHITE}{name}{C.RESET}  [{status_str}]"
+                line = f" {C.WHITE}{name}{C.RESET}  [{status_str}]"
                 lines.append(box_line_select(line, sel, W))
 
                 # Render group action overlay if active for this group
@@ -723,7 +747,7 @@ class TUI:
                         if action_sel:
                             action_label = f" ›{C.BOLD} {action}{C.RESET}"
                         else:
-                            action_label = f"   {C.WHITE}{action}{C.RESET}"
+                            action_label = f"  {C.WHITE}{action}{C.RESET}"
                         lines.append(box_line_select(action_label, action_sel, W))
 
         # "+ 添加新群"
@@ -732,30 +756,31 @@ class TUI:
         if add_sel:
             add_label = f" ›{C.BOLD} + 添加新群{C.RESET}"
         else:
-            add_label = f"   {C.WHITE}+ 添加新群{C.RESET}"
+            add_label = f"  {C.WHITE}+ 添加新群{C.RESET}"
         lines.append(box_line_select(add_label, add_sel, W))
 
-        # ── Separator ──
-        lines.append(box_line(f"  {C.GRAY}{HD * (W - 8)}{C.RESET}", W))
+        # ── Separator before exit ──
+        lines.append(section_divider("", W))
 
-        # "退出"
+        # "退出" — right-aligned per design spec
         exit_idx = 4 + len(groups) + 1
         exit_sel = self.main_selected == exit_idx
+        exit_text = "退出"
+        exit_inner_w = W - 4
+        exit_text_w = get_display_width(exit_text)
         if exit_sel:
-            exit_label = f" ›{C.BOLD} 退出{C.RESET}"
+            ptr_w = 2  # "› "
+            right_pad = 2
+            left_pad = max(0, exit_inner_w - ptr_w - exit_text_w - right_pad)
+            exit_label = f"{' ' * left_pad}› {C.BOLD}{exit_text}{C.RESET}{' ' * right_pad}"
         else:
-            exit_label = f"   {C.WHITE}退出{C.RESET}"
+            right_pad = 2
+            left_pad = max(0, exit_inner_w - exit_text_w - right_pad)
+            exit_label = f"{' ' * left_pad}{C.WHITE}{exit_text}{C.RESET}{' ' * right_pad}"
         lines.append(box_line_select(exit_label, exit_sel, W))
 
-        # ── Status bar ──
-        enabled_count = sum(1 for g in groups if g.get("enabled", True))
-        status = f"群组: {enabled_count}/{len(groups)} 个已启用"
-        if s["running"]:
-            status += f"  {C.GREEN}[监控中]{C.RESET}"
-        lines.append(box_line(f"  {C.DIM}{status}{C.RESET}", W))
-
         # ── Bottom border ──
-        lines.append(f"  {C.GRAY}{BL}{H * (W - 2)}{BR}{C.RESET}")
+        lines.append(f"  {C.GRAY}{BL}{H * (W - 4)}{BR}{C.RESET}")
         lines.append("")
         return lines
 
@@ -764,8 +789,11 @@ class TUI:
     # ═══════════════════════════════════════════════════════════
 
     def _handle_key(self, key: bytes):
-        """Route all keypresses to the single main handler."""
-        self._handle_main(key)
+        """Route all keypresses based on current state."""
+        if self._region_wait_active:
+            self._handle_region_wait(key)
+        else:
+            self._handle_main(key)
 
     # ── Main handler ──
 
@@ -859,35 +887,35 @@ class TUI:
             self._edit_cursor = len(self._edit_buffer)
 
     def _handle_reply_edit(self, key: bytes):
-        """Handle keyboard input during reply setting edit mode."""
-        if key == K.ENTER:
+        """Handle keyboard input during reply setting edit mode.
+        Uses getwch() internally for proper Chinese input support.
+        """
+        # Use getwch() for the actual input character
+        ch = msvcrt.getwch()
+
+        if ch == "\r":
             self._commit_reply_edit()
             return
-        if key == K.ESC:
+        if ch == "\x1b":
             self.reply_editing = False
             return
 
+        # Special key prefix — read the actual key code
+        if ch == "\x00":
+            real = msvcrt.getwch()
+            # Ignore arrow keys etc. during editing
+            return
+
         # Backspace
-        if key == b"\x08":
+        if ch == "\x08":
             if self._edit_cursor > 0:
                 self._edit_buffer = self._edit_buffer[:self._edit_cursor-1] + self._edit_buffer[self._edit_cursor:]
                 self._edit_cursor -= 1
             return
 
-        # Non-ASCII (Chinese etc.)
-        if key[0] > 127 or key == b"\x00" or key == b"\xe0":
-            try:
-                ch = key.decode("utf-8", errors="ignore")
-            except Exception:
-                return
-        else:
-            ch = key.decode("ascii", errors="ignore")
-
-        if not ch or not ch.isprintable():
-            return
-
-        self._edit_buffer = self._edit_buffer[:self._edit_cursor] + ch + self._edit_buffer[self._edit_cursor:]
-        self._edit_cursor += 1
+        if ch.isprintable():
+            self._edit_buffer = self._edit_buffer[:self._edit_cursor] + ch + self._edit_buffer[self._edit_cursor:]
+            self._edit_cursor += 1
 
     def _commit_reply_edit(self):
         """Save the edited value back to config."""
@@ -910,92 +938,136 @@ class TUI:
 
         self.reply_editing = False
 
-    # ── Add group ──
+    # ── Add group (state-based, incremental rendering) ──
 
     def _add_group(self):
-        """Add a new group via inline input."""
-        show_cursor()
-        clear_screen()
-        print(f"\n  {C.BLUE}{C.BOLD}添加新群{C.RESET}\n")
-        print(f"  {C.DIM}输入群名称 (Esc 取消):{C.RESET}")
-        print(f"  {C.GRAY}{TL}{H * 40}{TR}{C.RESET}")
-        sys.stdout.write(f"  {C.GRAY}{V} {C.RESET}")
-        sys.stdout.flush()
+        """Auto-create a new group named 群 N."""
+        existing = self.config.get_groups()
+        # Find next available number
+        used = set()
+        for g in existing:
+            name = g.get("name", "")
+            if name.startswith("群 "):
+                try:
+                    used.add(int(name[2:]))
+                except ValueError:
+                    pass
+        n = 1
+        while n in used:
+            n += 1
+        self.config.add_group(f"群 {n}")
 
-        name = self._read_line_input()
-        show_cursor()
+    def _render_region_wait(self) -> list[str]:
+        """Render the region-select confirmation screen."""
+        W = 60
+        lines = []
+        lines.append("")
 
-        if name.strip():
-            self.config.add_group(name.strip())
-            groups_after = self.config.get_groups()
-            self.main_selected = 4 + len(groups_after) - 1
+        title_text = self._region_wait_msg
+        title_prefix = f"─── {C.BLUE}{C.BOLD}{title_text}{C.RESET}{C.GRAY} "
+        prefix_vis = 4 + get_display_width(title_text) + 1
+        remaining = max(0, W - prefix_vis - 4)
+        lines.append(f"  {C.GRAY}{TL}{title_prefix}{H * remaining}{TR}{C.RESET}")
 
-        hide_cursor()
-        clear_screen()
-        self._last_lines = []
+        lines.append(box_line(f" {C.DIM}即将显示全屏截图{C.RESET}", W))
+        lines.append(box_line(f" {C.DIM}拖拽鼠标框选目标区域{C.RESET}", W))
+        lines.append(box_line(f" {C.YELLOW}按 Enter 开始框选，Esc 取消{C.RESET}", W))
 
-    # ── Region selector ──
+        lines.append(section_divider("", W))
+
+        lines.append(box_line(f" ›{C.BOLD} 开始框选{C.RESET}", W))
+        lines.append(box_line(f"  {C.WHITE}取消{C.RESET}", W))
+
+        hint = f"{C.DIM}[Up/Down] 导航    [Enter] 确认    [Esc] 返回{C.RESET}"
+        lines.append(box_line(f" {hint}", W))
+
+        lines.append(f"  {C.GRAY}{BL}{H * (W - 4)}{BR}{C.RESET}")
+        lines.append("")
+        return lines
 
     def _select_region(self, region_type: str):
-        """Open region selector for the selected group."""
+        """Enter region-select wait state. Shows instructions in TUI box."""
         groups = self.config.get_groups()
         if self._ga_group_idx >= len(groups):
             return
-
         group = groups[self._ga_group_idx]
         type_name = "消息区域" if region_type == "message_region" else "回复输入区域"
-
-        # Show instructions
-        show_cursor()
-        clear_screen()
-        print(f"\n  {C.BLUE}{C.BOLD}框选{type_name}{C.RESET}")
-        print(f"  {C.DIM}群组: {group['name']}{C.RESET}")
-        print(f"\n  {C.YELLOW}即将显示全屏截图。{C.RESET}")
-        print(f"  {C.DIM}拖拽鼠标框选{type_name}，按 Esc 取消。{C.RESET}")
-        print(f"\n  {C.DIM}按任意键继续...{C.RESET}")
-        sys.stdout.flush()
-
-        get_key()
-        hide_cursor()
-
-        title = f"框选 [{group['name']}] 的{type_name}"
-        rect = self.selector.select(title=title)
-
-        if rect:
-            self.config.set_group_region(self._ga_group_idx, region_type, rect)
-            print(f"\n  {C.GREEN}区域已保存: x={rect['x']}, y={rect['y']}, w={rect['w']}, h={rect['h']}{C.RESET}")
-            print(f"  {C.DIM}按任意键继续...{C.RESET}")
-            get_key()
-
-        clear_screen()
+        self._region_wait_active = True
+        self._region_wait_type = region_type
+        self._region_wait_msg = f"框选 [{group['name']}] 的{type_name}"
         self._last_lines = []
 
-    # ── Line input ──
+    def _render_region_wait(self) -> list[str]:
+        """Render the region-select confirmation screen."""
+        W = 60
+        lines = []
+        lines.append("")
 
-    def _read_line_input(self) -> str:
-        """Read a line of input with support for backspace. Returns on Enter/Esc."""
-        result = []
-        while True:
-            if msvcrt.kbhit():
-                ch = msvcrt.getwch()
-                if ch == "\r":
-                    return "".join(result)
-                if ch == "\x1b":
-                    return ""
-                if ch == "\x08":
-                    if result:
-                        last = result.pop()
-                        w = get_display_width(last)
-                        sys.stdout.write("\b" * w + " " * w + "\b" * w)
-                        sys.stdout.flush()
-                elif ch in ("\x00", "\xe0"):
-                    msvcrt.getwch()
-                elif ch.isprintable():
-                    result.append(ch)
-                    sys.stdout.write(ch)
-                    sys.stdout.flush()
+        title_text = self._region_wait_msg
+        title_prefix = f"─── {C.BLUE}{C.BOLD}{title_text}{C.RESET}{C.GRAY} "
+        prefix_vis = 4 + get_display_width(title_text) + 1
+        remaining = max(0, W - prefix_vis - 4)
+        lines.append(f"  {C.GRAY}{TL}{title_prefix}{H * remaining}{TR}{C.RESET}")
+
+        lines.append(box_line(f" {C.DIM}即将显示全屏截图{C.RESET}", W))
+        lines.append(box_line(f" {C.DIM}拖拽鼠标框选目标区域{C.RESET}", W))
+        lines.append(box_line(f" {C.YELLOW}按 Enter 开始框选，Esc 取消{C.RESET}", W))
+
+        # Separator
+        lines.append(section_divider("", W))
+
+        # Actions as cursor-selectable items
+        lines.append(box_line(f" ›{C.BOLD} 开始框选{C.RESET}", W))
+        lines.append(box_line(f"  {C.WHITE}取消{C.RESET}", W))
+
+        # Hint bar
+        hint = f"{C.DIM}[Up/Down] 导航    [Enter] 确认    [Esc] 返回{C.RESET}"
+        lines.append(box_line(f" {hint}", W))
+
+        lines.append(f"  {C.GRAY}{BL}{H * (W - 4)}{BR}{C.RESET}")
+        lines.append("")
+        return lines
+
+    def _handle_region_wait(self, key: bytes):
+        """Handle keyboard input during region-select wait state."""
+        # Two items: 0=start, 1=cancel
+        if key == K.UP:
+            self._region_wait_sel = (self._region_wait_sel - 1) % 2
+        elif key == K.DOWN:
+            self._region_wait_sel = (self._region_wait_sel + 1) % 2
+        elif key == K.ENTER:
+            if self._region_wait_sel == 0:
+                self._do_region_select()
             else:
-                time.sleep(0.01)
+                self._region_wait_active = False
+                self._last_lines = []
+            self._region_wait_sel = 0
+        elif key == K.ESC:
+            self._region_wait_active = False
+            self._last_lines = []
+            self._region_wait_sel = 0
+
+    def _do_region_select(self):
+        """Execute the actual tkinter region selector overlay."""
+        groups = self.config.get_groups()
+        if self._ga_group_idx >= len(groups):
+            self._region_wait_active = False
+            self._last_lines = []
+            return
+
+        group = groups[self._ga_group_idx]
+        title = self._region_wait_msg
+
+        # Temporarily show cursor for tkinter
+        show_cursor()
+        rect = self.selector.select(title=title)
+        hide_cursor()
+
+        if rect:
+            self.config.set_group_region(self._ga_group_idx, self._region_wait_type, rect)
+
+        self._region_wait_active = False
+        self._last_lines = []
 
 
 # ═══════════════════════════════════════════════════════════════
