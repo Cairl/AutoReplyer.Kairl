@@ -43,7 +43,7 @@ class C:
     BLUE        = f"{ESC}[38;2;137;180;250m"
     MAUVE       = f"{ESC}[38;2;203;166;247m"
     TEAL        = f"{ESC}[38;2;148;226;213m"
-    GRAY        = f"{ESC}[38;2;108;112;134m"
+    GRAY        = f"{ESC}[38;2;148;152;178m"  # #9498B2 — lighter, more readable
     SUBTEXT     = f"{ESC}[38;2;186;194;222m"
     WHITE       = f"{ESC}[38;2;205;214;244m"
     BG_SELECT   = f"{ESC}[48;2;49;116;143m"
@@ -52,7 +52,9 @@ class C:
 
 # ── Box-drawing characters ──
 TL, TR, BL, BR = "╭", "╮", "╰", "╯"
+ML, MR = "├", "┤"
 H, V = "─", "│"
+HD = "╌"  # dashed horizontal
 DIVIDER = f"{TL}{H * 58}{TR}"
 
 # ── Key codes (msvcrt returns bytes; arrow keys are prefixed with 0xe0) ──
@@ -96,7 +98,7 @@ def box_line(content: str, width: int = 60) -> str:
     inner_w = width - 4  # "│ " + content + " │"
     vis = get_display_width(content)
     pad = max(0, inner_w - vis)
-    return f"  {C.GRAY}{V} {content}{' ' * pad} {V}{C.RESET}"
+    return f"  {C.GRAY}{V} {content}{' ' * pad} {C.GRAY}{V}{C.RESET}"
 
 
 def box_line_select(content: str, selected: bool, width: int = 60) -> str:
@@ -529,36 +531,25 @@ class Monitor:
 # ═══════════════════════════════════════════════════════════════
 
 class TUI:
-    """Terminal UI with incremental rendering and keyboard navigation."""
-
-    # ── Screens ──
-    MAIN          = "main"
-    REPLY         = "reply"
-    GROUPS        = "groups"
-    GROUP_ACTIONS = "group_actions"
-    MONITOR       = "monitor"
+    """Terminal UI with incremental rendering and keyboard navigation.
+    Single scrollable panel with all content merged into one view.
+    """
 
     def __init__(self):
         self.config = Config()
         self.monitor = Monitor(self.config)
         self.selector = RegionSelector()
 
-        self.screen = self.MAIN
         self.running = True
 
-        # Main menu
+        # Single cursor for all selectable items
         self.main_selected = 0
-
-        # Reply settings
-        self.reply_selected = 0
         self.reply_editing = False
 
-        # Group management
-        self.group_selected = 0    # index into groups list (+ "添加新群" / "返回")
-        self.ga_selected = 0       # group actions submenu cursor
-
-        # Monitor
-        self.mon_selected = 0      # 0=toggle button, 1=返回
+        # Group action inline overlay state
+        self.group_modal_active = False
+        self.group_modal_idx = 0
+        self._ga_group_idx = -1
 
         # Rendering
         self._last_lines: list[str] = []
@@ -607,7 +598,7 @@ class TUI:
     # ── Incremental rendering ──
 
     def _render(self):
-        lines = self._get_render_lines()
+        lines = self._render_main()
 
         if not self._last_lines:
             clear_screen()
@@ -624,78 +615,55 @@ class TUI:
         self._last_lines = lines
         sys.stdout.flush()
 
-    def _get_render_lines(self) -> list[str]:
-        if self.screen == self.MAIN:
-            return self._render_main()
-        elif self.screen == self.REPLY:
-            return self._render_reply()
-        elif self.screen == self.GROUPS:
-            return self._render_groups()
-        elif self.screen == self.GROUP_ACTIONS:
-            return self._render_group_actions()
-        elif self.screen == self.MONITOR:
-            return self._render_monitor()
-        return []
-
-    # ── Main menu ──
-
-    _MAIN_ITEMS = ["回复设置", "群管理", "监控面板", "退出"]
+    # ═══════════════════════════════════════════════════════════
+    #  MAIN — Single Unified Panel
+    # ═══════════════════════════════════════════════════════════
 
     def _render_main(self) -> list[str]:
+        """Render the single unified panel: stats + reply settings + group management + exit."""
         W = 60
         lines = []
-
-        lines.append("")
-        lines.append(f"  {C.MAUVE}{C.BOLD}AutoReplyer.Kairl{C.RESET}")
-        lines.append(f"  {C.DIM}微信群 @所有人 自动回复工具{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.GRAY}{TL}{H * (W - 2)}{TR}{C.RESET}")
-
-        for i, item in enumerate(self._MAIN_ITEMS):
-            sel = i == self.main_selected
-            label = f"  {item}"
-            if sel:
-                label = f" ›{C.BOLD} {item}{C.RESET}"
-            lines.append(box_line_select(label, sel, W))
-
-        lines.append(f"  {C.GRAY}{BL}{H * (W - 2)}{BR}{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.DIM}[Up/Down] 导航    [Enter] 确认    [Esc] 退出{C.RESET}")
-
-        # Status bar
+        s = self.monitor.stats
         groups = self.config.get_groups()
-        enabled = sum(1 for g in groups if g.get("enabled", True))
-        status = f"群组: {enabled}/{len(groups)} 个已启用"
-        if self.monitor.stats["running"]:
-            status += f"  {C.GREEN}[监控中]{C.RESET}"
-        lines.append(f"  {C.DIM}{status}{C.RESET}")
-
-        return lines
-
-    # ── Reply settings ──
-
-    def _render_reply(self) -> list[str]:
-        W = 60
-        lines = []
 
         lines.append("")
-        lines.append(f"  {C.BLUE}{C.BOLD}回复设置{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.GRAY}{TL}{H * (W - 2)}{TR}{C.RESET}")
 
-        # Build items (4 settings + "返回")
-        items = [
+        # Title embedded in top border: ╭─── AutoReplyer.Kairl ────────╮
+        title_text = "AutoReplyer.Kairl"
+        title_prefix = f"─── {C.MAUVE}{C.BOLD}{title_text}{C.RESET}{C.GRAY} "
+        prefix_vis = 4 + len(title_text) + 1  # "─── " + title + trailing space
+        remaining = max(0, W - 2 - prefix_vis)
+        lines.append(f"  {C.GRAY}{TL}{title_prefix}{H * remaining}{TR}{C.RESET}")
+
+        # ── Monitor stats ──
+        running_color = C.GREEN if s["running"] else C.RED
+        status_text = "运行中" if s["running"] else "已停止"
+        lines.append(box_line(f"  {C.DIM}监控状态{C.RESET}    {running_color}{status_text}{C.RESET}", W))
+
+        counters = (
+            f"  {C.DIM}触发:{C.RESET} {C.YELLOW}{s['triggers']}{C.RESET}       "
+            f"{C.DIM}回复:{C.RESET} {C.GREEN}{s['replies']}{C.RESET}       "
+            f"{C.DIM}错误:{C.RESET} {C.RED}{s['errors']}{C.RESET}"
+        )
+        lines.append(box_line(counters, W))
+        lines.append(box_line(f"  {C.DIM}最后触发{C.RESET}     {C.WHITE}{s['last_trigger']}{C.RESET}", W))
+        lines.append(box_line(f"  {C.DIM}最后回复{C.RESET}     {C.WHITE}{s['last_reply']}{C.RESET}", W))
+
+        # ── Separator (plain dashed, no ├┤) ──
+        lines.append(box_line(f"  {C.GRAY}{HD * (W - 8)}{C.RESET}", W))
+
+        # ── Reply settings section ──
+        lines.append(box_line(f"  {C.TEAL}{C.BOLD}── 回复设置 ──{C.RESET}", W))
+
+        reply_items = [
             ("回复内容",     self.config.get_reply("content", ""),         "str"),
             ("最小延迟 (秒)", str(self.config.get_reply("delay_min", 1.0)), "float"),
             ("最大延迟 (秒)", str(self.config.get_reply("delay_max", 3.0)), "float"),
             ("扫描间隔 (秒)", str(self.config.get_reply("scan_interval", 2.0)), "float"),
         ]
-
-        for i, (label, value, _) in enumerate(items):
-            sel = i == self.reply_selected
+        for i, (label, value, _) in enumerate(reply_items):
+            sel = i == self.main_selected
             editing = sel and self.reply_editing
-
-            # When editing, show live buffer instead of saved config value
             display_val = self._edit_buffer if editing else value
 
             if editing:
@@ -703,47 +671,21 @@ class TUI:
             elif sel:
                 line = f" ›{C.BOLD} {label}:{C.RESET} {C.GREEN}{value}{C.RESET}"
             else:
-                line = f"   {C.SUBTEXT}{label}:{C.RESET} {C.WHITE}{value}{C.RESET}"
-
+                line = f"   {C.WHITE}{label}:{C.RESET} {C.WHITE}{value}{C.RESET}"
             lines.append(box_line(line, W))
 
-        lines.append(f"  {C.GRAY}{H * W}{C.RESET}")
-        lines.append(f"  {C.DIM}内容: 回复文本 (支持中文){C.RESET}")
-        lines.append(f"  {C.DIM}延迟: 回复前随机等待 (秒){C.RESET}")
-        lines.append(f"  {C.DIM}间隔: 扫描 @所有人 的频率 (秒){C.RESET}")
+        # ── Separator ──
+        lines.append(box_line(f"  {C.GRAY}{HD * (W - 8)}{C.RESET}", W))
 
-        # "返回" item
-        back_sel = self.reply_selected == 4
-        back_label = f"  返回"
-        if back_sel:
-            back_label = f" ›{C.BOLD} 返回{C.RESET}"
-        lines.append(box_line_select(back_label, back_sel, W))
-
-        lines.append(f"  {C.GRAY}{BL}{H * (W - 2)}{BR}{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.DIM}[Up/Down] 导航    [Enter] 编辑/返回    [Esc] 返回{C.RESET}")
-
-        return lines
-
-    # ── Group management ──
-
-    def _render_groups(self) -> list[str]:
-        W = 60
-        lines = []
-        groups = self.config.get_groups()
-        # Total items: groups + "添加新群" + "返回"
-        n_total = len(groups) + 2
-
-        lines.append("")
-        lines.append(f"  {C.TEAL}{C.BOLD}群管理{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.GRAY}{TL}{H * (W - 2)}{TR}{C.RESET}")
+        # ── Group management section ──
+        lines.append(box_line(f"  {C.TEAL}{C.BOLD}── 群管理 ──{C.RESET}", W))
 
         if not groups:
             lines.append(box_line(f"  {C.DIM}(暂无群组配置){C.RESET}", W))
         else:
             for i, group in enumerate(groups):
-                sel = i == self.group_selected
+                group_idx = 4 + i
+                sel = group_idx == self.main_selected
                 enabled = group.get("enabled", True)
                 has_msg = group.get("message_region") is not None
                 has_rpl = group.get("reply_region") is not None
@@ -763,220 +705,161 @@ class TUI:
                 else:
                     status_parts.append(f"{C.DIM}----{C.RESET}")
 
-                status = " ".join(status_parts)
+                status_str = " ".join(status_parts)
                 name = group["name"]
-                line = f"  {name}  [{status}]"
+                line = f"  {C.WHITE}{name}{C.RESET}  [{status_str}]"
                 lines.append(box_line_select(line, sel, W))
 
-        lines.append(f"  {C.GRAY}{H * W}{C.RESET}")
+                # Render group action overlay if active for this group
+                if self.group_modal_active and self._ga_group_idx == i:
+                    group_actions = [
+                        "停用监视" if enabled else "启用监视",
+                        "设置消息区域",
+                        "设置回复区域",
+                        "删除此群"
+                    ]
+                    for j, action in enumerate(group_actions):
+                        action_sel = j == self.group_modal_idx
+                        if action_sel:
+                            action_label = f" ›{C.BOLD} {action}{C.RESET}"
+                        else:
+                            action_label = f"   {C.WHITE}{action}{C.RESET}"
+                        lines.append(box_line_select(action_label, action_sel, W))
 
-        # "添加新群" item
-        add_idx = len(groups)
-        add_sel = self.group_selected == add_idx
-        add_label = f"  + 添加新群"
+        # "+ 添加新群"
+        add_idx = 4 + len(groups)
+        add_sel = self.main_selected == add_idx
         if add_sel:
             add_label = f" ›{C.BOLD} + 添加新群{C.RESET}"
+        else:
+            add_label = f"   {C.WHITE}+ 添加新群{C.RESET}"
         lines.append(box_line_select(add_label, add_sel, W))
 
-        # "返回" item
-        back_idx = len(groups) + 1
-        back_sel = self.group_selected == back_idx
-        back_label = f"  返回"
-        if back_sel:
-            back_label = f" ›{C.BOLD} 返回{C.RESET}"
-        lines.append(box_line_select(back_label, back_sel, W))
+        # ── Separator ──
+        lines.append(box_line(f"  {C.GRAY}{HD * (W - 8)}{C.RESET}", W))
 
+        # "退出"
+        exit_idx = 4 + len(groups) + 1
+        exit_sel = self.main_selected == exit_idx
+        if exit_sel:
+            exit_label = f" ›{C.BOLD} 退出{C.RESET}"
+        else:
+            exit_label = f"   {C.WHITE}退出{C.RESET}"
+        lines.append(box_line_select(exit_label, exit_sel, W))
+
+        # ── Status bar ──
+        enabled_count = sum(1 for g in groups if g.get("enabled", True))
+        status = f"群组: {enabled_count}/{len(groups)} 个已启用"
+        if s["running"]:
+            status += f"  {C.GREEN}[监控中]{C.RESET}"
+        lines.append(box_line(f"  {C.DIM}{status}{C.RESET}", W))
+
+        # ── Bottom border ──
         lines.append(f"  {C.GRAY}{BL}{H * (W - 2)}{BR}{C.RESET}")
         lines.append("")
-        lines.append(f"  {C.DIM}[Up/Down] 导航    [Enter] 选择    [Esc] 返回{C.RESET}")
-
         return lines
 
-    # ── Group actions submenu ──
-
-    def _render_group_actions(self) -> list[str]:
-        W = 60
-        lines = []
-        groups = self.config.get_groups()
-
-        if self._ga_group_idx >= len(groups):
-            return ["  群组不存在"]
-
-        group = groups[self._ga_group_idx]
-        enabled = group.get("enabled", True)
-        has_msg = group.get("message_region") is not None
-        has_rpl = group.get("reply_region") is not None
-
-        # Build action items
-        toggle_label = "停用监视" if enabled else "启用监视"
-        actions = [
-            (toggle_label,    True),
-            ("设置消息区域",   True),
-            ("设置回复区域",   True),
-            ("删除此群",      True),
-            ("返回",          True),
-        ]
-
-        lines.append("")
-        lines.append(f"  {C.TEAL}{C.BOLD}{group['name']}{C.RESET}  {C.DIM}群组操作{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.GRAY}{TL}{H * (W - 2)}{TR}{C.RESET}")
-
-        for i, (label, _) in enumerate(actions):
-            sel = i == self.ga_selected
-            line = f"  {label}"
-            if sel:
-                line = f" ›{C.BOLD} {label}{C.RESET}"
-            lines.append(box_line_select(line, sel, W))
-
-        lines.append(f"  {C.GRAY}{H * W}{C.RESET}")
-
-        # Current status
-        st_parts = []
-        st_parts.append(f"状态: {C.GREEN}启用{C.RESET}" if enabled else f"状态: {C.RED}停用{C.RESET}")
-        st_parts.append(f"消息区: {C.GREEN}已设{C.RESET}" if has_msg else f"消息区: {C.YELLOW}未设{C.RESET}")
-        st_parts.append(f"回复区: {C.GREEN}已设{C.RESET}" if has_rpl else f"回复区: {C.YELLOW}未设{C.RESET}")
-        lines.append(box_line(f"  {'  '.join(st_parts)}", W))
-
-        lines.append(f"  {C.GRAY}{BL}{H * (W - 2)}{BR}{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.DIM}[Up/Down] 导航    [Enter] 执行    [Esc] 返回{C.RESET}")
-
-        return lines
-
-    # ── Monitor screen ──
-
-    def _render_monitor(self) -> list[str]:
-        W = 60
-        lines = []
-        s = self.monitor.stats
-
-        lines.append("")
-        color = C.GREEN if s["running"] else C.GRAY
-        lines.append(f"  {color}{C.BOLD}监控面板{C.RESET}  {C.DIM}[{s['status']}]{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.GRAY}{TL}{H * (W - 2)}{TR}{C.RESET}")
-
-        # Stats
-        stats_items = [
-            ("状态",     s["status"]),
-            ("扫描次数", str(s["scans"])),
-            ("触发次数", f"{C.YELLOW}{s['triggers']}{C.RESET}" if s["triggers"] else "0"),
-            ("回复次数", f"{C.GREEN}{s['replies']}{C.RESET}" if s["replies"] else "0"),
-            ("错误次数", f"{C.RED}{s['errors']}{C.RESET}" if s["errors"] else "0"),
-            ("最后触发", s["last_trigger"]),
-            ("最后回复", s["last_reply"]),
-        ]
-
-        for label, value in stats_items:
-            line = f"  {C.SUBTEXT}{label}:{C.RESET} {C.WHITE}{value}{C.RESET}"
-            lines.append(box_line(line, W))
-
-        lines.append(f"  {C.GRAY}{H * W}{C.RESET}")
-
-        # Monitored groups
-        groups = self.config.get_groups()
-        active = [g for g in groups if g.get("enabled") and g.get("message_region")]
-        lines.append(box_line(f"  {C.DIM}监视群组: {len(active)} 个{C.RESET}", W))
-
-        for g in active[:5]:
-            lines.append(box_line(f"    {C.WHITE}{g['name']}{C.RESET}", W))
-
-        lines.append(f"  {C.GRAY}{H * W}{C.RESET}")
-
-        # Toggle button
-        toggle_label = "停止监控" if s["running"] else "启动监控"
-        toggle_sel = self.mon_selected == 0
-        line = f"  {toggle_label}"
-        if toggle_sel:
-            line = f" ›{C.BOLD} {toggle_label}{C.RESET}"
-        lines.append(box_line_select(line, toggle_sel, W))
-
-        # "返回" item
-        back_sel = self.mon_selected == 1
-        back_label = f"  返回"
-        if back_sel:
-            back_label = f" ›{C.BOLD} 返回{C.RESET}"
-        lines.append(box_line_select(back_label, back_sel, W))
-
-        lines.append(f"  {C.GRAY}{BL}{H * (W - 2)}{BR}{C.RESET}")
-        lines.append("")
-        lines.append(f"  {C.DIM}[Up/Down] 导航    [Enter] 确认    [Esc] 返回{C.RESET}")
-
-        return lines
-
-    # ── Input handling ──
+    # ═══════════════════════════════════════════════════════════
+    #  Key Handling
+    # ═══════════════════════════════════════════════════════════
 
     def _handle_key(self, key: bytes):
-        if self.screen == self.MAIN:
-            self._handle_main(key)
-        elif self.screen == self.REPLY:
-            self._handle_reply(key)
-        elif self.screen == self.GROUPS:
-            self._handle_groups(key)
-        elif self.screen == self.GROUP_ACTIONS:
-            self._handle_group_actions(key)
-        elif self.screen == self.MONITOR:
-            self._handle_monitor(key)
+        """Route all keypresses to the single main handler."""
+        self._handle_main(key)
+
+    # ── Main handler ──
 
     def _handle_main(self, key: bytes):
-        n = len(self._MAIN_ITEMS)
+        """Handle keyboard input on the unified single panel.
+        Handles reply editing, group modal navigation, add group, and exit.
+        """
+        if self.reply_editing:
+            self._handle_reply_edit(key)
+            return
+
+        groups = self.config.get_groups()
+        n = 4 + len(groups) + 2  # 4 reply items + N groups + add + exit
+
+        if self.group_modal_active:
+            # Modal navigation: 4 items (toggle, set msg, set reply, delete)
+            if key == K.UP:
+                self.group_modal_idx = (self.group_modal_idx - 1) % 4
+            elif key == K.DOWN:
+                self.group_modal_idx = (self.group_modal_idx + 1) % 4
+            elif key == K.ENTER:
+                self._execute_group_modal_action()
+            elif key == K.ESC or key == b"\x08":
+                self.group_modal_active = False
+            return
+
         if key == K.UP:
             self.main_selected = (self.main_selected - 1) % n
         elif key == K.DOWN:
             self.main_selected = (self.main_selected + 1) % n
         elif key == K.ENTER:
-            idx = self.main_selected
-            if idx == 0:
-                self.screen = self.REPLY
-                self.reply_selected = 0
-                self.reply_editing = False
-                self._last_lines = []
-            elif idx == 1:
-                self.screen = self.GROUPS
-                self.group_selected = 0
-                self._last_lines = []
-            elif idx == 2:
-                self.screen = self.MONITOR
-                self.mon_selected = 0
-                self._last_lines = []
-            elif idx == 3:
-                self.running = False
-        elif key == K.ESC:
-            self.running = False
-
-    def _handle_reply(self, key: bytes):
-        if self.reply_editing:
-            self._handle_reply_edit(key)
-            return
-
-        n = 5  # 4 settings + "返回"
-        if key == K.UP:
-            self.reply_selected = (self.reply_selected - 1) % n
-        elif key == K.DOWN:
-            self.reply_selected = (self.reply_selected + 1) % n
-        elif key == K.ENTER:
-            if self.reply_selected == 4:  # "返回"
-                self.screen = self.MAIN
-                self._last_lines = []
-            else:
+            if self.main_selected < 4:
+                # Reply item → enter edit mode
                 self.reply_editing = True
                 self._start_reply_edit()
-        elif key == K.ESC:
-            self.screen = self.MAIN
-            self._last_lines = []
+            elif self.main_selected < 4 + len(groups):
+                # Group → open inline overlay
+                self._ga_group_idx = self.main_selected - 4
+                self.group_modal_active = True
+                self.group_modal_idx = 0
+            elif self.main_selected == 4 + len(groups):
+                # Add group
+                self._add_group()
+                # Adjust cursor after add
+                new_n = 4 + len(self.config.get_groups()) + 2
+                self.main_selected = min(self.main_selected, new_n - 1)
+            else:
+                # Exit
+                self.running = False
+        elif key == K.ESC or key == b"\x08":
+            self.running = False
+
+    # ── Group modal action ──
+
+    def _execute_group_modal_action(self):
+        """Execute the selected inline overlay action for the current group."""
+        groups = self.config.get_groups()
+        if self._ga_group_idx >= len(groups):
+            self.group_modal_active = False
+            return
+
+        idx = self._ga_group_idx
+
+        if self.group_modal_idx == 0:
+            # Toggle enable/disable
+            self.config.toggle_group(idx)
+        elif self.group_modal_idx == 1:
+            # Set message region
+            self._select_region("message_region")
+        elif self.group_modal_idx == 2:
+            # Set reply region
+            self._select_region("reply_region")
+        elif self.group_modal_idx == 3:
+            # Delete group
+            self.config.remove_group(idx)
+            n = 4 + len(self.config.get_groups()) + 2
+            self.main_selected = min(self.main_selected, max(0, n - 1))
+
+        self.group_modal_active = False
+
+    # ── Reply editing ──
 
     def _start_reply_edit(self):
         """Enter edit mode for the selected reply setting."""
         self._edit_buffer = ""
         self._edit_cursor = 0
         keys = ["content", "delay_min", "delay_max", "scan_interval"]
-        if self.reply_selected < len(keys):
-            val = self.config.get_reply(keys[self.reply_selected], "")
+        if self.main_selected < len(keys):
+            val = self.config.get_reply(keys[self.main_selected], "")
             self._edit_buffer = str(val)
             self._edit_cursor = len(self._edit_buffer)
 
     def _handle_reply_edit(self, key: bytes):
+        """Handle keyboard input during reply setting edit mode."""
         if key == K.ENTER:
             self._commit_reply_edit()
             return
@@ -1009,10 +892,10 @@ class TUI:
     def _commit_reply_edit(self):
         """Save the edited value back to config."""
         keys = ["content", "delay_min", "delay_max", "scan_interval"]
-        if self.reply_selected >= len(keys):
+        if self.main_selected >= len(keys):
             return
 
-        key = keys[self.reply_selected]
+        key = keys[self.main_selected]
         val = self._edit_buffer.strip()
 
         if key == "content":
@@ -1027,73 +910,7 @@ class TUI:
 
         self.reply_editing = False
 
-    def _handle_groups(self, key: bytes):
-        groups = self.config.get_groups()
-        n_total = len(groups) + 2  # groups + "添加新群" + "返回"
-
-        if key == K.UP:
-            self.group_selected = (self.group_selected - 1) % n_total
-        elif key == K.DOWN:
-            self.group_selected = (self.group_selected + 1) % n_total
-        elif key == K.ENTER:
-            if self.group_selected < len(groups):
-                # Selected an existing group → open actions submenu
-                self._ga_group_idx = self.group_selected
-                self.ga_selected = 0
-                self.screen = self.GROUP_ACTIONS
-                self._last_lines = []
-            elif self.group_selected == len(groups):
-                # "添加新群"
-                self._add_group()
-            else:
-                # "返回"
-                self.screen = self.MAIN
-                self._last_lines = []
-        elif key == K.ESC:
-            self.screen = self.MAIN
-            self._last_lines = []
-
-    def _handle_group_actions(self, key: bytes):
-        n = 5  # 5 actions
-        if key == K.UP:
-            self.ga_selected = (self.ga_selected - 1) % n
-        elif key == K.DOWN:
-            self.ga_selected = (self.ga_selected + 1) % n
-        elif key == K.ENTER:
-            self._execute_group_action()
-        elif key == K.ESC:
-            self.screen = self.GROUPS
-            self._last_lines = []
-
-    def _execute_group_action(self):
-        """Execute the selected action in the group actions submenu."""
-        groups = self.config.get_groups()
-        if self._ga_group_idx >= len(groups):
-            self.screen = self.GROUPS
-            self._last_lines = []
-            return
-
-        idx = self._ga_group_idx
-
-        if self.ga_selected == 0:
-            # Toggle enable/disable
-            self.config.toggle_group(idx)
-        elif self.ga_selected == 1:
-            # Set message region
-            self._select_region("message_region")
-        elif self.ga_selected == 2:
-            # Set reply region
-            self._select_region("reply_region")
-        elif self.ga_selected == 3:
-            # Delete group
-            self.config.remove_group(idx)
-            self.screen = self.GROUPS
-            self.group_selected = min(self.group_selected, max(0, len(self.config.get_groups()) + 1))
-            self._last_lines = []
-        elif self.ga_selected == 4:
-            # "返回"
-            self.screen = self.GROUPS
-            self._last_lines = []
+    # ── Add group ──
 
     def _add_group(self):
         """Add a new group via inline input."""
@@ -1110,11 +927,14 @@ class TUI:
 
         if name.strip():
             self.config.add_group(name.strip())
-            self.group_selected = len(self.config.get_groups()) - 1
+            groups_after = self.config.get_groups()
+            self.main_selected = 4 + len(groups_after) - 1
 
         hide_cursor()
         clear_screen()
         self._last_lines = []
+
+    # ── Region selector ──
 
     def _select_region(self, region_type: str):
         """Open region selector for the selected group."""
@@ -1150,6 +970,8 @@ class TUI:
         clear_screen()
         self._last_lines = []
 
+    # ── Line input ──
+
     def _read_line_input(self) -> str:
         """Read a line of input with support for backspace. Returns on Enter/Esc."""
         result = []
@@ -1174,33 +996,6 @@ class TUI:
                     sys.stdout.flush()
             else:
                 time.sleep(0.01)
-
-    def _handle_monitor(self, key: bytes):
-        if key == K.UP:
-            self.mon_selected = (self.mon_selected - 1) % 2
-        elif key == K.DOWN:
-            self.mon_selected = (self.mon_selected + 1) % 2
-        elif key == K.ENTER:
-            if self.mon_selected == 0:
-                # Toggle monitoring
-                if self.monitor.stats["running"]:
-                    self.monitor.stop()
-                else:
-                    try:
-                        self.monitor.start()
-                    except RuntimeError as e:
-                        self.monitor.stats["status"] = f"错误: {e}"
-            else:
-                # "返回"
-                if self.monitor.stats["running"]:
-                    self.monitor.stop()
-                self.screen = self.MAIN
-                self._last_lines = []
-        elif key == K.ESC:
-            if self.monitor.stats["running"]:
-                self.monitor.stop()
-            self.screen = self.MAIN
-            self._last_lines = []
 
 
 # ═══════════════════════════════════════════════════════════════
