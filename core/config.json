@@ -1,0 +1,9 @@
+{
+  "reply": {
+    "content": "收到",
+    "delay_min": 1.0,
+    "delay_max": 3.0,
+    "scan_interval": 2.0
+  },
+  "groups": []
+}
