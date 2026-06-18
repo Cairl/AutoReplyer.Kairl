@@ -1,9 +1,28 @@
 {
   "reply": {
-    "content": "收到",
+    "content": "2",
     "delay_min": 1.0,
     "delay_max": 3.0,
     "scan_interval": 2.0
   },
-  "groups": []
+  "groups": [
+    {
+      "name": "群 1",
+      "enabled": true,
+      "message_region": null,
+      "reply_region": null
+    },
+    {
+      "name": "群 2",
+      "enabled": true,
+      "message_region": null,
+      "reply_region": null
+    },
+    {
+      "name": "群 3",
+      "enabled": true,
+      "message_region": null,
+      "reply_region": null
+    }
+  ]
 }

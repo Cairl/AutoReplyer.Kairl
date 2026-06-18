@@ -8,10 +8,11 @@ import copy
 import tempfile
 from pathlib import Path
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 
 DEFAULT_CONFIG = {
     "reply": {
+        "trigger": "@所有人",
         "content": "收到",
         "delay_min": 1.0,
         "delay_max": 3.0,

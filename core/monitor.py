@@ -17,8 +17,6 @@ class Monitor:
     Runs in a daemon thread. Shares stats dict with TUI for live display.
     """
 
-    TRIGGER_PATTERNS = ["@所有人", "@all", "@All", "@ALL"]
-
     def __init__(self, config: Config):
         self.config = config
         self._thread: threading.Thread | None = None
@@ -111,7 +109,9 @@ class Monitor:
             result = self._ocr_engine.recognize_pil_sync(screenshot, "zh-Hans-CN")
             all_text = result.get("text", "")
 
-            triggered = any(pat in all_text for pat in self.TRIGGER_PATTERNS)
+            trigger_str = self.config.get_reply("trigger", "@所有人")
+            patterns = [p.strip() for p in trigger_str.split(",") if p.strip()] or ["@所有人"]
+            triggered = any(pat in all_text for pat in patterns)
 
             if triggered:
                 now = time.time()

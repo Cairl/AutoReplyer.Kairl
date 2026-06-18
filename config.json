@@ -1,26 +1,28 @@
 {
   "reply": {
-    "content": "123123daskxjdk2231",
+    "content": "收到",
     "delay_min": 1.0,
     "delay_max": 3.0,
-    "scan_interval": 2.0
+    "scan_interval": 2.0,
+    "trigger": "@所有人"
   },
   "groups": [
     {
-      "name": "123",
+      "name": "群 1",
       "enabled": true,
       "message_region": {
-        "x": 50,
-        "y": 357,
-        "w": 1071,
-        "h": 909
+        "x": 691,
+        "y": 1525,
+        "w": 320,
+        "h": 263
       },
-      "reply_region": {
-        "x": 62,
-        "y": 1301,
-        "w": 1020,
-        "h": 371
-      }
+      "reply_region": null
+    },
+    {
+      "name": "群 2",
+      "enabled": true,
+      "message_region": null,
+      "reply_region": null
     }
   ]
 }
