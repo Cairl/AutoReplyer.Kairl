@@ -5,5 +5,22 @@
     "delay_max": 3.0,
     "scan_interval": 2.0
   },
-  "groups": []
+  "groups": [
+    {
+      "name": "123",
+      "enabled": true,
+      "message_region": {
+        "x": 50,
+        "y": 357,
+        "w": 1071,
+        "h": 909
+      },
+      "reply_region": {
+        "x": 62,
+        "y": 1301,
+        "w": 1020,
+        "h": 371
+      }
+    }
+  ]
 }

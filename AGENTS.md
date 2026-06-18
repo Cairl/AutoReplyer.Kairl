@@ -18,14 +18,14 @@ AutoReplyer.Kairl/
 - msvcrt: non-blocking keyboard input
 - PyAutoGUI: screen capture, mouse/keyboard automation
 - Pillow: image processing
-- PaddleOCR: Chinese text recognition in screen regions
+- winocr: Windows built-in OCR engine (no torch dependency)
 - pywin32 (win32clipboard): Chinese clipboard support
 - tkinter: region selection overlay (stdlib)
 
 ## Dependencies
 
 ```
-pip install pyautogui pillow pygetwindow pywin32 paddleocr paddlepaddle
+pip install pyautogui pillow pywin32 winocr
 ```
 
 ## How It Works

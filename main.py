@@ -20,22 +20,7 @@ from datetime import datetime
 os.system("")  # Enable VT100 on Windows
 
 
-def _check_deps():
-    """Verify required packages are importable. Exit with clear message if not."""
-    missing = []
-    for mod, pkg in [("msvcrt", None), ("pyautogui", "pyautogui"), ("PIL", "pillow")]:
-        try:
-            __import__(mod)
-        except ImportError:
-            missing.append(pkg or mod)
-    if missing:
-        print(f"缺少依赖包: {', '.join(missing)}")
-        print(f"请安装:  pip install {' '.join(missing)}")
-        sys.exit(1)
-
-
-_check_deps()
-
+# ── Imports (fail fast with clear error if missing) ──
 import msvcrt
 import pyautogui
 from PIL import Image
@@ -111,7 +96,7 @@ def box_line(content: str, width: int = 60) -> str:
     inner_w = width - 4  # "│ " + content + " │"
     vis = get_display_width(content)
     pad = max(0, inner_w - vis)
-    return f"{C.GRAY}{V} {content}{' ' * pad} {V}{C.RESET}"
+    return f"  {C.GRAY}{V} {content}{' ' * pad} {V}{C.RESET}"
 
 
 def box_line_select(content: str, selected: bool, width: int = 60) -> str:
@@ -120,7 +105,7 @@ def box_line_select(content: str, selected: bool, width: int = 60) -> str:
     if selected:
         vis = get_display_width(content)
         pad = max(0, inner_w - vis)
-        return f"{C.GRAY}{V}{C.RESET}{C.BG_SELECT}{C.BOLD} {content}{' ' * pad} {C.RESET}{C.GRAY}{V}{C.RESET}"
+        return f"  {C.GRAY}{V}{C.RESET}{C.BG_SELECT}{C.BOLD} {content}{' ' * pad} {C.RESET}{C.GRAY}{V}{C.RESET}"
     else:
         return box_line(content, width)
 
@@ -392,18 +377,13 @@ class Monitor:
         self._recent_triggers: dict[str, float] = {}  # group_name -> timestamp
 
     def _init_ocr(self):
-        """Lazy-init PaddleOCR (heavy import, only when monitoring starts)."""
+        """Lazy-init winocr (lightweight, uses Windows built-in OCR engine)."""
         if self._ocr_engine is None:
             try:
-                from paddleocr import PaddleOCR
-                self._ocr_engine = PaddleOCR(
-                    use_angle_cls=False,
-                    lang="ch",
-                    show_log=False,
-                    use_gpu=False
-                )
+                import winocr
+                self._ocr_engine = winocr
             except ImportError:
-                raise RuntimeError("PaddleOCR 未安装，请运行: pip install paddleocr paddlepaddle")
+                raise RuntimeError("winocr 未安装，请运行: pip install winocr")
 
     def start(self):
         if self.stats["running"]:
@@ -463,25 +443,14 @@ class Monitor:
         name = group["name"]
 
         try:
-            # Capture the message region
+            # Capture the message region as PIL Image
             screenshot = pyautogui.screenshot(region=(
                 region["x"], region["y"], region["w"], region["h"]
             ))
 
-            # Convert to numpy for PaddleOCR
-            import numpy as np
-            img_array = np.array(screenshot)
-
-            # Run OCR
-            result = self._ocr_engine.ocr(img_array, cls=False)
-            if not result or not result[0]:
-                return
-
-            # Extract all text
-            all_text = ""
-            for line in result[0]:
-                if line and len(line) >= 2:
-                    all_text += line[1][0] + " "
+            # Run OCR via winocr (Windows built-in engine, no torch dependency)
+            result = self._ocr_engine.recognize_pil_sync(screenshot, "zh-Hans-CN")
+            all_text = result.get("text", "")
 
             # Check for @all trigger
             triggered = any(pat in all_text for pat in self.TRIGGER_PATTERNS)
@@ -503,7 +472,7 @@ class Monitor:
 
         except Exception as e:
             self.stats["errors"] += 1
-            self.stats["status"] = f"扫描错误 ({name}): {str(e)[:30]}"
+            self.stats["status"] = f"扫描错误 ({name}): {type(e).__name__}: {str(e)[:30]}"
 
     def _auto_reply(self, group: dict):
         """Send auto-reply to a group's reply region."""
@@ -597,10 +566,16 @@ class TUI:
         self._term_h = 25
 
     def run(self):
-        """Main entry: clear screen, render loop, restore cursor."""
+        """Main entry: clear screen, auto-start monitor, render loop, restore cursor."""
         atexit_register(show_cursor)
         hide_cursor()
         clear_screen()
+
+        # Auto-start monitoring on launch
+        try:
+            self.monitor.start()
+        except Exception as e:
+            self.monitor.stats["status"] = f"启动失败: {e}"
 
         try:
             while self.running:
@@ -664,7 +639,7 @@ class TUI:
 
     # ── Main menu ──
 
-    _MAIN_ITEMS = ["回复设置", "群管理", "启动监控", "退出"]
+    _MAIN_ITEMS = ["回复设置", "群管理", "监控面板", "退出"]
 
     def _render_main(self) -> list[str]:
         W = 60
@@ -720,8 +695,11 @@ class TUI:
             sel = i == self.reply_selected
             editing = sel and self.reply_editing
 
+            # When editing, show live buffer instead of saved config value
+            display_val = self._edit_buffer if editing else value
+
             if editing:
-                line = f"  {C.BOLD}{C.TEAL}[>]{C.RESET} {C.WHITE}{label}:{C.RESET} {C.YELLOW}{value}_"
+                line = f"  {C.BOLD}{C.TEAL}[>]{C.RESET} {C.WHITE}{label}:{C.RESET} {C.YELLOW}{display_val}_"
             elif sel:
                 line = f" ›{C.BOLD} {label}:{C.RESET} {C.GREEN}{value}{C.RESET}"
             else:
