@@ -10,14 +10,15 @@ AutoReplyer.Kairl/
   core/
     __init__.py
     config.py          # Config manager: auto-generation, field repair, hot-reload
-    monitor.py         # Background OCR monitor: bubble-color detection, auto-reply
-    overlay.py         # Red rectangle overlay: click-through tkinter window showing captured region
-    region.py          # Screen region selector: tkinter overlay
+    monitor.py         # Background OCR monitor: pair-detection, auto-reply, notification
+    overlay.py         # Dual-rectangle overlay: red (received) + green (reply), click-through tkinter
+    region.py          # Screen region selector: PySide6 QDialog overlay
   ui/
     __init__.py
     ui.py              # Colors, box-drawing, display helpers, keyboard input
     tui.py             # TUI application: rendering, navigation, all screens
   config.json          # Auto-generated runtime configuration
+  CHANGELOG.md
   AGENTS.md
 ```
 
@@ -27,22 +28,27 @@ AutoReplyer.Kairl/
 - msvcrt: non-blocking keyboard input
 - PyAutoGUI: screen capture, mouse/keyboard automation
 - Pillow: image processing
-- numpy: bubble color-matching (#2F2F30 / #EEEEF0)
+- numpy: bubble color-matching (#2F2F30 / #EEEEF0) + pair detection (std)
 - winocr: Windows built-in OCR engine (no torch dependency)
-- pywin32 (win32clipboard): Chinese clipboard support
-- tkinter: region selection overlay (stdlib)
+- pywin32 (win32clipboard): Chinese clipboard support + shortcut creation
+- PySide6 (QDialog): region selector overlay (from MusicClassifier)
+- winotify: Windows toast notification after reply
 
 ## Dependencies
 
 ```
-pip install pyautogui pillow numpy pywin32 winocr
+pip install pyautogui pillow numpy pywin32 winocr PySide6 winotify
 ```
 
 ## How It Works
 
 1. **TUI Configuration** — Main menu with Reply Settings and Group Settings
-2. **Region Selection** — Full-screen screenshot overlay, drag to select message/reply areas
-3. **Monitoring** — Background thread captures the message region, locates the bottom-left chat bubble by color (#2F2F30 night / #EEEEF0 day), OCR-scans only that latest received bubble for trigger keywords, and auto-replies via clipboard paste ONLY when no self-sent reply bubble (green #9DF29F light / #35D28D dark) sits at or below it. A short-lived in-flight guard covers the reply-delay window. Each capture flashes a red rectangle (click-through tkinter overlay) around the scanned region. Monitoring per group is toggled on/off from the group's action menu and persisted in config.json (the `enabled` field).
+2. **Region Selection** — PySide6 QDialog full-screen overlay with dark mask + white border + crosshair + confirm/cancel toolbar, DPI-aware via `devicePixelRatio()`
+3. **Monitoring** — Background thread with 3-second startup delay. Captures the message region, locates the bottom-left chat bubble by color (#2F2F30 night / #EEEEF0 day), clicks the bubble to expose hidden content, OCR-scans the latest received bubble for trigger keywords.
+4. **Pair Detection** — Screenshots the right-half area below the received bubble, computes `np.std()`: high variance = reply content exists below = already replied → skip; low variance = no reply → trigger.
+5. **Auto-Reply** — Clipboard paste via `win32clipboard`, Ctrl+V + Enter. Random delay (delay_min ~ delay_max). In-flight guard (bubble signature) prevents duplicate firing during reply render window.
+6. **Visual Overlay** — Red rectangle around received bubble, green rectangle around reply content (if detected). Click-through tkinter window, 0.5s hold.
+7. **Notification** — Windows toast via `winotify` with AUMID shortcut auto-registration on first use.
 
 ## Key Design Decisions
 
@@ -50,15 +56,19 @@ pip install pyautogui pillow numpy pywin32 winocr
 - Incremental rendering: only redraw changed lines, zero flicker
 - Config hot-reload: monitor reads config.json changes without restart
 - Per-group regions: each group has independent message_area and reply_area coordinates
-- Bubble-color detection: matches #2F2F30 (night) or #EEEEF0 (day) in the left half of the region to isolate the latest received message; self-sent bubbles are detected separately by their green color (#9DF29F light / #35D28D dark) across the whole region
-- Screen-based "already replied" check: a trigger fires only when the keyword bubble has no green reply bubble at or below it — so stale on-screen messages aren't re-replied and the same keyword sent again after an answer is correctly re-replied. A per-group in-flight guard (keyed by the trigger bubble's position+text signature) prevents double-firing during the reply delay, before the green bubble renders
+- Bubble-color detection: matches #2F2F30 (night) or #EEEEF0 (day) in the left half
+- Pair-detection "already replied" check: `np.std()` on receiver bubble's below-right area → no green-color dependency, survives restarts, handles obscured content
+- In-flight guard: `MD5(row|w|h|text)` signature with `delay_max + 5s` expiry per group
+- Click-to-expose: keyword match clicks the bubble, re-screenshots, re-analyzes pair before replying
+- No persistent history: pure screen-based detection, zero disk state beyond config.json
 - Atomic config writes: temp file + os.replace prevents corruption
 - Auto-named groups: "群 1", "群 2", etc. — no manual naming needed
+- Startup delay: 3-second no-scan window on launch, TUI shows yellow "启动中"
 
 ## TUI Navigation
 
-- Pure cursor navigation: Up/Down/Enter/Esc only
-- All operations via cursor navigation + Enter confirmation
+- Cursor navigation: Up/Down/Enter/Esc
 - Reply settings: Enter to edit inline, Enter to confirm, Esc to cancel
-- Groups: Enter to open action sub-menu (toggle, set regions, delete)
-- Group actions: [选择消息位置] [选择输入位置] [删除] [监测: 开/关] — Left/Right to switch, Enter to execute. The 监测 action toggles per-group monitoring (green ● = on, red ○ = off), persisted to config.json
+- Groups: Enter to open action sub-menu (select regions, delete)
+- Group actions: [选择消息位置] [选择输入位置] [删除] — Left/Right to switch, Enter to execute
+- Bottom row: monitoring toggle — Enter switches 已启动/已停止, Esc exits app

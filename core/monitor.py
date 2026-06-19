@@ -438,6 +438,21 @@ class Monitor:
     def _notify(group_name: str, content: str):
         """Show a Windows toast notification after replying."""
         try:
+            import os, sys
+
+            # winotify requires a Start Menu shortcut with matching app_id.
+            # Create one on first use if it doesn't exist.
+            appdata = os.environ.get("APPDATA", "")
+            lnk_dir = os.path.join(appdata, r"Microsoft\Windows\Start Menu\Programs\AutoReplyer")
+            lnk_path = os.path.join(lnk_dir, "AutoReplyer.Kairl.lnk")
+            if not os.path.exists(lnk_path):
+                os.makedirs(lnk_dir, exist_ok=True)
+                from win32com.client import Dispatch
+                shell = Dispatch("WScript.Shell")
+                shortcut = shell.CreateShortcut(lnk_path)
+                shortcut.TargetPath = sys.executable
+                shortcut.Save()
+
             from winotify import Notification
             Notification(
                 app_id="AutoReplyer.Kairl",
