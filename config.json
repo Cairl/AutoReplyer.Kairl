@@ -1,9 +1,9 @@
 {
   "reply": {
-    "content": "收到",
-    "delay_min": 1.0,
-    "delay_max": 3.0,
-    "scan_interval": 2.0,
+    "content": "2",
+    "delay_min": 0.0,
+    "delay_max": 0.0,
+    "scan_interval": 0.5,
     "trigger": "@所有人"
   },
   "groups": [
@@ -11,18 +11,17 @@
       "name": "群 1",
       "enabled": true,
       "message_region": {
-        "x": 691,
-        "y": 1525,
-        "w": 320,
-        "h": 263
+        "x": 21,
+        "y": 290,
+        "w": 1289,
+        "h": 1282
       },
-      "reply_region": null
-    },
-    {
-      "name": "群 2",
-      "enabled": true,
-      "message_region": null,
-      "reply_region": null
+      "reply_region": {
+        "x": 41,
+        "y": 1608,
+        "w": 1238,
+        "h": 356
+      }
     }
   ]
 }

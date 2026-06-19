@@ -10,7 +10,7 @@ AutoReplyer.Kairl/
   core/
     __init__.py
     config.py          # Config manager: auto-generation, field repair, hot-reload
-    monitor.py         # Background OCR monitor: @all detection, auto-reply
+    monitor.py         # Background OCR monitor: bubble-color detection, auto-reply
     region.py          # Screen region selector: tkinter overlay
   ui/
     __init__.py
@@ -26,6 +26,7 @@ AutoReplyer.Kairl/
 - msvcrt: non-blocking keyboard input
 - PyAutoGUI: screen capture, mouse/keyboard automation
 - Pillow: image processing
+- numpy: bubble color-matching (#2F2F30 / #EEEEF0)
 - winocr: Windows built-in OCR engine (no torch dependency)
 - pywin32 (win32clipboard): Chinese clipboard support
 - tkinter: region selection overlay (stdlib)
@@ -33,14 +34,14 @@ AutoReplyer.Kairl/
 ## Dependencies
 
 ```
-pip install pyautogui pillow pywin32 winocr
+pip install pyautogui pillow numpy pywin32 winocr
 ```
 
 ## How It Works
 
 1. **TUI Configuration** — Main menu with Reply Settings and Group Settings
 2. **Region Selection** — Full-screen screenshot overlay, drag to select message/reply areas
-3. **Monitoring** — Background thread captures message regions via screenshot, runs OCR to detect @all, auto-replies via clipboard paste
+3. **Monitoring** — Background thread captures the message region, locates the bottom-left chat bubble by color (#2F2F30 night / #EEEEF0 day), OCR-scans only that latest received bubble for trigger keywords, auto-replies via clipboard paste. Each trigger message gets exactly one reply (md5 dedup).
 
 ## Key Design Decisions
 
@@ -48,7 +49,8 @@ pip install pyautogui pillow pywin32 winocr
 - Incremental rendering: only redraw changed lines, zero flicker
 - Config hot-reload: monitor reads config.json changes without restart
 - Per-group regions: each group has independent message_area and reply_area coordinates
-- Debounce: 30-second cooldown per group prevents duplicate replies
+- Bubble-color detection: matches #2F2F30 (night) or #EEEEF0 (day) in the left half of the region to isolate the latest received message; self-sent (right-side) bubbles are excluded
+- Per-message dedup: md5 hash of the last replied bubble text ensures each trigger message gets exactly one reply — no stale replies, no duplicates
 - Atomic config writes: temp file + os.replace prevents corruption
 - Auto-named groups: "群 1", "群 2", etc. — no manual naming needed
 

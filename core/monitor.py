@@ -1,5 +1,13 @@
 """
-Background OCR monitor: scans message regions for @all, auto-replies.
+Background OCR monitor: scans the latest received bubble for trigger keywords, auto-replies.
+
+Detection logic:
+  1. Screenshot the group's message_region.
+  2. Locate the bottom-left chat bubble by color:
+       night mode #2F2F30 (47,47,48) / day mode #EEEEF0 (238,238,240).
+  3. OCR only that bubble (the latest received message).
+  4. If a trigger keyword matches AND this message hasn't been replied yet,
+     auto-reply once. Per-message hash dedup guarantees exactly one reply.
 """
 
 import time
@@ -13,8 +21,13 @@ from core.config import Config
 
 class Monitor:
     """
-    Background OCR monitor: scans message regions for @all, auto-replies.
+    Background OCR monitor: scans the latest received bubble for trigger keywords, auto-replies.
     Runs in a daemon thread. Shares stats dict with TUI for live display.
+
+    Dedup model: per group, the md5 hash of the last replied bubble text is kept.
+    A trigger fires only when the current bottom-left bubble's text hash differs
+    from the stored one — guaranteeing each trigger message gets exactly one reply,
+    no stale replies, no duplicate replies.
     """
 
     def __init__(self, config: Config):
@@ -34,7 +47,8 @@ class Monitor:
             "last_reply": "N/A",
             "status": "空闲"
         }
-        self._recent_triggers: dict[str, float] = {}
+        # group_name -> md5 hex of last replied bubble text
+        self._last_replied_hash: dict[str, str] = {}
 
     def _init_ocr(self):
         """Lazy-init winocr."""
@@ -96,8 +110,78 @@ class Monitor:
 
         self.stats["status"] = "Stopped"
 
+    def _find_bottom_left_bubble(self, screenshot):
+        """Locate the bottom-most left-side chat bubble by color.
+
+        WeChat received-message bubble colors:
+          - Night mode: #2F2F30 = (47, 47, 48)
+          - Day mode:   #EEEEF0 = (238, 238, 240)
+        Both colors are matched simultaneously; whichever is present is used.
+        Only the left half of the region is scanned (received messages are
+        left-aligned; sent messages are right-aligned and thus excluded).
+
+        Returns (x, y, w, h) relative to the screenshot, or None if no bubble.
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            raise RuntimeError("numpy 未安装，请运行: pip install numpy")
+
+        img = np.array(screenshot.convert("RGB"))
+        h, w = img.shape[:2]
+
+        night = np.array([47, 47, 48], dtype=np.int16)
+        day = np.array([238, 238, 240], dtype=np.int16)
+        tol = 8
+
+        diff = img.astype(np.int16)
+        mask = (
+            np.all(np.abs(diff - night) <= tol, axis=2)
+            | np.all(np.abs(diff - day) <= tol, axis=2)
+        )
+
+        # Left half only — filters out self-sent (right-side) bubbles.
+        half_w = w // 2
+        left_mask = mask[:, :half_w]
+        row_has = left_mask.any(axis=1)
+
+        rows_with = np.where(row_has)[0]
+        if len(rows_with) == 0:
+            return None
+
+        bottom = int(rows_with[-1])
+
+        # Walk upward through the continuous band to find the bubble's top.
+        top = bottom
+        while top > 0 and row_has[top - 1]:
+            top -= 1
+
+        # Horizontal extent of this band within the left half.
+        band = left_mask[top:bottom + 1, :]
+        cols = np.where(band.any(axis=0))[0]
+        if len(cols) == 0:
+            return None
+
+        x_min = int(cols[0])
+        x_max = int(cols[-1])
+        bw = x_max - x_min + 1
+        bh = bottom - top + 1
+
+        # Reject tiny noise patches.
+        if bw < 40 or bh < 15:
+            return None
+
+        return (x_min, top, bw, bh)
+
     def _scan_group(self, group: dict):
-        """Scan one group's message region for @all trigger."""
+        """Scan one group's latest received bubble for trigger keywords.
+
+        Only the bottom-left bubble is OCR'd. A trigger fires at most once per
+        unique bubble text (md5 dedup), so the same on-screen message never
+        triggers twice and stale messages are never re-replied.
+        """
+        import hashlib
+
         region = group["message_region"]
         name = group["name"]
 
@@ -106,25 +190,38 @@ class Monitor:
                 region["x"], region["y"], region["w"], region["h"]
             ))
 
-            result = self._ocr_engine.recognize_pil_sync(screenshot, "zh-Hans-CN")
-            all_text = result.get("text", "")
+            bubble = self._find_bottom_left_bubble(screenshot)
+            if bubble is None:
+                return
+
+            bx, by, bw, bh = bubble
+            bubble_img = screenshot.crop((bx, by, bx + bw, by + bh))
+
+            result = self._ocr_engine.recognize_pil_sync(bubble_img, "zh-Hans-CN")
+            # winocr returns a dict, not an object — use .get() not getattr()
+            text = result.get("text", "") if isinstance(result, dict) else getattr(result, "text", "")
+            text = (text or "").strip()
+            text = " ".join(text.split())  # normalize whitespace for stable hashing
+
+            if not text:
+                return
 
             trigger_str = self.config.get_reply("trigger", "@所有人")
             patterns = [p.strip() for p in trigger_str.split(",") if p.strip()] or ["@所有人"]
-            triggered = any(pat in all_text for pat in patterns)
+            if not any(pat in text for pat in patterns):
+                return
 
-            if triggered:
-                now = time.time()
-                last = self._recent_triggers.get(name, 0)
-                if now - last < 30:
-                    return
+            # Dedup: exactly one reply per unique trigger message.
+            text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+            if text_hash == self._last_replied_hash.get(name):
+                return  # already replied to this exact message
 
-                self._recent_triggers[name] = now
-                self.stats["triggers"] += 1
-                self.stats["last_trigger"] = f"{name} @ {datetime.now().strftime('%H:%M:%S')}"
+            self._last_replied_hash[name] = text_hash
+            self.stats["triggers"] += 1
+            self.stats["last_trigger"] = f"{name} @ {datetime.now().strftime('%H:%M:%S')}"
 
-                if group.get("reply_region"):
-                    self._auto_reply(group)
+            if group.get("reply_region"):
+                self._auto_reply(group)
 
         except Exception as e:
             self.stats["errors"] += 1
@@ -147,7 +244,6 @@ class Monitor:
             click_x = region["x"] + region["w"] // 2
             click_y = region["y"] + region["h"] // 2
             pyautogui.click(click_x, click_y)
-            time.sleep(0.3)
 
             try:
                 import win32clipboard
@@ -161,7 +257,6 @@ class Monitor:
                 proc.communicate(content.encode("utf-16-le"))
 
             pyautogui.hotkey("ctrl", "v")
-            time.sleep(0.2)
             pyautogui.press("enter")
 
             self.stats["replies"] += 1
