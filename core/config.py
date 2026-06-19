@@ -11,7 +11,8 @@ from pathlib import Path
 CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 
 DEFAULT_CONFIG = {
-    "monitoring": True,   # global monitoring on/off (persists across restarts)
+    "monitoring": True,        # global monitoring on/off (persists across restarts)
+    "gpu_acceleration": True,  # use GPU (CuPy) for image array operations when available
     "reply": {
         "trigger": "@所有人",
         "content": "收到",
@@ -145,3 +146,12 @@ class Config:
         if 0 <= index < len(groups):
             groups[index]["enabled"] = not groups[index]["enabled"]
             self._save()
+
+    def get_gpu_acceleration(self) -> bool:
+        """Whether GPU acceleration is enabled in config (default True)."""
+        return bool(self.data.get("gpu_acceleration", True))
+
+    def set_gpu_acceleration(self, value: bool):
+        """Enable or disable GPU acceleration in config."""
+        self.data["gpu_acceleration"] = bool(value)
+        self._save()

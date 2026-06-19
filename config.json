@@ -24,5 +24,6 @@
       }
     }
   ],
-  "monitoring": true
+  "monitoring": true,
+  "gpu_acceleration": true
 }

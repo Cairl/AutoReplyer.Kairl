@@ -24,6 +24,10 @@ import pyautogui
 
 from core.config import Config
 from core.overlay import RegionOverlay
+from core.gpu import xp
+
+# Pillow always returns CPU numpy arrays; keep plain numpy for the Pillow→array step.
+import numpy
 
 
 class Monitor:
@@ -160,23 +164,24 @@ class Monitor:
         Returns a dict:
           {"bubble": (x,y,w,h)|None, "bubble_bottom": int|None, "already_replied": bool}
         """
-        try:
-            import numpy as np
-        except ImportError:
-            raise RuntimeError("numpy not installed: pip install numpy")
-
-        img = np.array(screenshot.convert("RGB"))
-        h, w = img.shape[:2]
+        # Pillow.screenshot → CPU numpy array.
+        img_cpu = numpy.array(screenshot.convert("RGB"))
+        h, w = img_cpu.shape[:2]
         tol = 8
-        diff = img.astype(np.int16)
 
-        # ── Received bubble (left half) ──
-        night = np.array(self._NIGHT_RECV, dtype=np.int16)
-        day = np.array(self._DAY_RECV, dtype=np.int16)
-        recv_mask = (
-            np.all(np.abs(diff - night) <= tol, axis=2)
-            | np.all(np.abs(diff - day) <= tol, axis=2)
+        # ── GPU-accelerated color matching (heavy pure-array ops) ──
+        img_gpu = xp.asarray(img_cpu)
+        diff = img_gpu.astype(xp.int16)
+        night = xp.array(self._NIGHT_RECV, dtype=xp.int16)
+        day = xp.array(self._DAY_RECV, dtype=xp.int16)
+        recv_mask_gpu = (
+            xp.all(xp.abs(diff - night) <= tol, axis=2)
+            | xp.all(xp.abs(diff - day) <= tol, axis=2)
         )
+        # Transfer mask back to CPU for control-flow-heavy bubble-finding.
+        recv_mask = xp.asnumpy(recv_mask_gpu) if hasattr(xp, "asnumpy") else recv_mask_gpu
+
+        # ── Bubble detection on CPU (numpy, proven control-flow safety) ──
         bubble = self._find_lowest_bubble(recv_mask[:, :w // 2], min_w=40, min_h=15)
         bubble_bottom = bubble[1] + bubble[3] - 1 if bubble else None
 
@@ -184,22 +189,20 @@ class Monitor:
         already_replied = False
         reply_box = None
         if bubble is not None and bubble_bottom is not None and bubble_bottom < h - 5:
-            # Crop right half, from below the received bubble to the bottom of the image.
-            below_right = img[bubble_bottom:, w // 2:]
-            if below_right.size > 0:
-                # High std deviation = significant visual content = a reply bubble exists.
-                below_std = float(np.std(below_right))
+            below_right_gpu = img_gpu[bubble_bottom:, w // 2:]
+            if below_right_gpu.size > 0:
+                # Run std on GPU, transfer scalar result to CPU.
+                below_std = float(xp.std(below_right_gpu))
                 already_replied = below_std > 30
-                # If replied, locate the reply content bounding box for visual overlay.
                 if already_replied:
-                    row_std = np.std(below_right, axis=(1, 2))
-                    content_rows = np.where(row_std > 20)[0]
+                    row_std_gpu = xp.std(below_right_gpu, axis=(1, 2))
+                    row_std = xp.asnumpy(row_std_gpu) if hasattr(xp, "asnumpy") else row_std_gpu
+                    content_rows = numpy.where(row_std > 20)[0]
                     if len(content_rows) > 0:
                         r_top = int(content_rows[0]) + bubble_bottom
                         r_bottom = int(content_rows[-1]) + bubble_bottom
                         reply_box = (w // 2, r_top, w - w // 2, r_bottom - r_top + 1)
             else:
-                # Edge case: received bubble is at the very bottom → no room for a reply.
                 already_replied = False
 
         return {
@@ -222,9 +225,10 @@ class Monitor:
         The first band from the bottom that passes is returned — so a thin line
         of noise sitting below the real bubble is skipped in favor of the bubble
         above it. Returns (x, y, w, h) or None.
-        """
-        import numpy as np
 
+        NOTE: mask is always a CPU numpy array — GPU→CPU transfer happens
+        in _analyze_region() before this function is called.
+        """
         h, w = mask.shape[:2]
         row_has = mask.any(axis=1)
 
@@ -241,7 +245,7 @@ class Monitor:
 
             # Horizontal extent across the whole band.
             band = mask[band_top:band_bottom + 1, :]
-            cols = np.where(band.any(axis=0))[0]
+            cols = numpy.where(band.any(axis=0))[0]
             if len(cols) > 0:
                 x_min = int(cols[0])
                 x_max = int(cols[-1])

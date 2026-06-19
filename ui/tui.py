@@ -15,6 +15,7 @@ from ui.ui import (
 from core.config import Config
 from core.monitor import Monitor
 from core.region import RegionSelector
+from core.gpu import gpu_available, gpu_info, cupy_available, gpu_fallback_reason
 
 
 class TUI:
@@ -137,6 +138,17 @@ class TUI:
     def _bottom_border(self, W: int) -> str:
         return f"{C.GRAY}{BL}{H * (W - 2)}{BR}{C.RESET}"
 
+    def _gpu_status_str(self) -> str:
+        """GPU acceleration status line (informational, not selectable)."""
+        gpu_accel_config = self.config.get_gpu_acceleration()
+        if not gpu_available:
+            return f"{C.LABEL}硬件加速:{C.RESET} {C.GRAY}未检测到{C.RESET}"
+        if not gpu_accel_config:
+            return f"{C.LABEL}硬件加速:{C.RESET} {C.RED}已禁用{C.RESET}"
+        if not cupy_available:
+            return f"{C.LABEL}硬件加速:{C.RESET} {C.YELLOW}已回退 CPU ({gpu_fallback_reason}){C.RESET}"
+        return f"{C.LABEL}硬件加速:{C.RESET} {C.GREEN}已启用 ({gpu_info}){C.RESET}"
+
     # ═══════════════════════════════════════════════════════════
     #  Main Panel
     # ═══════════════════════════════════════════════════════════
@@ -152,6 +164,9 @@ class TUI:
         trigger = s['last_trigger']
         elapsed_str = f"{s['reply_elapsed']:.1f} 秒" if s.get("reply_elapsed") is not None else "N/A"
         items.append((f"{C.LABEL}最后触发:{C.RESET} {C.PEACH}{trigger}{C.RESET} {C.LABEL}用时{C.RESET} {C.PEACH}{elapsed_str}{C.RESET}", False))
+
+        # GPU acceleration status (informational)
+        items.append((self._gpu_status_str(), False))
 
         # Groups (selectable indices 0 .. n_groups-1).
         group_render_data = []  # (name_str, opt_str); opt_str empty for non-focused
@@ -215,6 +230,9 @@ class TUI:
         # Stats (not selectable)
         lines.append(self._line(items[0][0], W))
 
+        # GPU acceleration status (informational, not selectable)
+        lines.append(self._line(items[1][0], W))
+
         # Group settings
         lines.append(self._divider("群设置", W))
         inner = W - 6
@@ -234,7 +252,7 @@ class TUI:
                 lines.append(f"{C.GRAY}{V}  {content} {C.GRAY}{V}{C.RESET}")
 
         # Add group
-        c, _ = items[1 + n_groups]  # 1 stat + n_groups groups = 1+n_groups
+        c, _ = items[2 + n_groups]  # 1 stat + 1 gpu + n_groups groups
         sel = self.main_selected == n_groups
         if sel:
             inner = W - 6
@@ -245,7 +263,7 @@ class TUI:
         # Reply settings
         lines.append(self._divider("回复设置", W))
         for i in range(5):
-            c, _ = items[2 + n_groups + i]  # 1 stat + n_groups groups + 1 add
+            c, _ = items[3 + n_groups + i]  # 1 stat + 1 gpu + n_groups groups + 1 add
             sel = (n_groups + 1 + i) == self.main_selected
             lines.append(self._line_sel(c, W) if sel else self._line(c, W))
 
