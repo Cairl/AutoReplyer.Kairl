@@ -121,12 +121,20 @@ class RegionOverlay:
 
     # ── API (called from monitor thread) ──
 
-    def show(self, region: dict, reply_region: dict | None = None):
-        """Briefly flash a red box around the given {x, y, w, h} region,
-        and optionally a green box around reply_region."""
+    def show(self, region: dict, reply_region: dict | None = None, paired: bool = False):
+        """Briefly flash a box around the given {x, y, w, h} region.
+
+        - paired=False (default): a red box around `region` plus, when
+          `reply_region` is given, a separate green box around it. Used while a
+          trigger is being evaluated / a reply is pending.
+        - paired=True: a SINGLE merged cyan box covering both `region` and
+          `reply_region`. Used when the received bubble and its green reply are
+          already paired on screen — they form one contextual whole, so they
+          get one outline instead of two.
+        """
         if self._thread is None:
             return
-        msg = {"region": dict(region)}
+        msg = {"region": dict(region), "paired": bool(paired)}
         if reply_region is not None:
             msg["reply_region"] = dict(reply_region)
         self._queue.put(msg)
@@ -191,52 +199,102 @@ class RegionOverlay:
                     except Exception:
                         pass
                     return
-                self._draw(msg["region"])
+                self._draw(msg)
         except queue.Empty:
             pass
         self._root.after(50, self._drain_queue)
 
-    def _draw(self, region: dict):
-        """Draw red box (received) + optional green box (reply)."""
+    def _draw(self, payload: dict):
+        """Draw the overlay for one show() request.
+
+        payload shape: {"region": {...}, "reply_region": {...}|absent,
+                        "paired": bool}.
+
+        - paired + reply_region present: one merged cyan box around the union
+          of region and reply_region (the whole received+reply context pair).
+        - otherwise: red box around region, plus a green box around
+          reply_region when it is present.
+        """
         if self._canvas is None or self._root is None:
             return
 
-        # --- Received bubble (red #F38B8C, width=3) ---
-        x = int(region.get("x", 0)) - self._vx
-        y = int(region.get("y", 0)) - self._vy
-        w = int(region.get("w", 0))
-        h = int(region.get("h", 0))
-        if w > 0 and h > 0:
-            coords = (x, y, x + w, y + h)
-            if self._rect_id is None:
-                self._rect_id = self._canvas.create_rectangle(
-                    *coords, outline="#F38B8C", width=3
-                )
-            else:
-                self._canvas.coords(self._rect_id, *coords)
-            self._canvas.itemconfig(self._rect_id, state="normal")
-            self._canvas.tag_raise(self._rect_id)
+        region = payload.get("region", {}) or {}
+        reply = payload.get("reply_region")
+        paired = payload.get("paired", False)
 
-        # --- Reply content (green #A6E3A1, width=2) ---
-        reply = region.get("reply_region")
-        if reply is not None:
-            rx = int(reply.get("x", 0)) - self._vx
-            ry = int(reply.get("y", 0)) - self._vy
-            rw = int(reply.get("w", 0))
-            rh = int(reply.get("h", 0))
-            if rw > 0 and rh > 0:
-                rcoords = (rx, ry, rx + rw, ry + rh)
-                if self._reply_rect_id is None:
-                    self._reply_rect_id = self._canvas.create_rectangle(
-                        *rcoords, outline="#A6E3A1", width=2
+        # Convert physical-pixel screen coords → canvas coords (subtract the
+        # virtual-screen origin so monitors left/above the primary still work).
+        rx_scr = int(region.get("x", 0))
+        ry_scr = int(region.get("y", 0))
+        rw = int(region.get("w", 0))
+        rh = int(region.get("h", 0))
+
+        if paired and reply is not None:
+            # ── Merged whole-context box (cyan #8CDEF6, width=3) ──
+            # One box around the union of received bubble + its paired reply,
+            # signalling "this pair is already resolved — leave it alone".
+            rpx_scr = int(reply.get("x", 0))
+            rpy_scr = int(reply.get("y", 0))
+            rpw = int(reply.get("w", 0))
+            rph = int(reply.get("h", 0))
+            if rw > 0 and rh > 0 and rpw > 0 and rph > 0:
+                union_x = min(rx_scr, rpx_scr) - self._vx
+                union_y = min(ry_scr, rpy_scr) - self._vy
+                union_w = max(rx_scr + rw, rpx_scr + rpw) - min(rx_scr, rpx_scr)
+                union_h = max(ry_scr + rh, rpy_scr + rph) - min(ry_scr, rpy_scr)
+                coords = (union_x, union_y, union_x + union_w, union_y + union_h)
+                if self._rect_id is None:
+                    self._rect_id = self._canvas.create_rectangle(
+                        *coords, outline="#8CDEF6", width=3
                     )
                 else:
-                    self._canvas.coords(self._reply_rect_id, *rcoords)
-                self._canvas.itemconfig(self._reply_rect_id, state="normal")
-                self._canvas.tag_raise(self._reply_rect_id)
-        else:
+                    self._canvas.coords(self._rect_id, *coords)
+                    self._canvas.itemconfig(
+                        self._rect_id, outline="#8CDEF6", width=3, state="normal"
+                    )
+                self._canvas.tag_raise(self._rect_id)
+            # Hide the separate reply rect — the merged box already covers it.
             if self._reply_rect_id is not None:
                 self._canvas.itemconfig(self._reply_rect_id, state="hidden")
+        else:
+            # ── Received bubble (red #F38B8C, width=3) ──
+            if rw > 0 and rh > 0:
+                x = rx_scr - self._vx
+                y = ry_scr - self._vy
+                coords = (x, y, x + rw, y + rh)
+                if self._rect_id is None:
+                    self._rect_id = self._canvas.create_rectangle(
+                        *coords, outline="#F38B8C", width=3
+                    )
+                else:
+                    self._canvas.coords(self._rect_id, *coords)
+                    self._canvas.itemconfig(
+                        self._rect_id, outline="#F38B8C", width=3, state="normal"
+                    )
+                self._canvas.tag_raise(self._rect_id)
+
+            # ── Reply content (green #A6E3A1, width=2) ──
+            if reply is not None:
+                rrx = int(reply.get("x", 0)) - self._vx
+                rry = int(reply.get("y", 0)) - self._vy
+                rrw = int(reply.get("w", 0))
+                rrh = int(reply.get("h", 0))
+                if rrw > 0 and rrh > 0:
+                    rcoords = (rrx, rry, rrx + rrw, rry + rrh)
+                    if self._reply_rect_id is None:
+                        self._reply_rect_id = self._canvas.create_rectangle(
+                            *rcoords, outline="#A6E3A1", width=2
+                        )
+                    else:
+                        self._canvas.coords(self._reply_rect_id, *rcoords)
+                        self._canvas.itemconfig(
+                            self._reply_rect_id, outline="#A6E3A1", width=2,
+                            state="normal"
+                        )
+                    self._canvas.tag_raise(self._reply_rect_id)
+            else:
+                if self._reply_rect_id is not None:
+                    self._canvas.itemconfig(self._reply_rect_id, state="hidden")
 
         # Auto-hide
         if self._hide_job is not None:

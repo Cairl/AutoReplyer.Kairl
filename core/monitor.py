@@ -3,14 +3,17 @@ Background OCR monitor: scans the latest received bubble for trigger keywords, a
 
 Detection logic:
   1. Screenshot the group's message_region.
-  2. Locate the bottom-most received bubble on the left half by color:
+  2. Locate received bubbles on the left half by color:
        night mode #2F2F30 (47,47,48) / day mode #EEEEF0 (238,238,240).
-  3. Check the right half BELOW that bubble: high pixel std deviation means a
-     reply bubble already sits there (already answered → skip); low variance
-     means no reply yet → trigger.
-  4. OCR only the latest received bubble.
-  5. A trigger fires ONLY when that bubble contains a keyword AND the
-     below-area is blank (i.e. we haven't already replied to it).
+  3. Locate self-sent reply bubbles on the right half by color:
+       light mode #9DF29F (157,242,159) / dark mode #35D28D (53,210,141).
+  4. Pair each received bubble with the nearest green reply bubble that sits
+     at/after it and before the next received bubble. This builds explicit
+     received->reply pairs and is robust to interleaved messages: a reply
+     nestled between two received messages pairs with the one above it.
+  5. OCR only the lowest received bubble.
+  6. A trigger fires ONLY when that bubble contains a keyword AND it has no
+     paired green reply (i.e. we haven't already answered it).
      A short-lived in-flight guard covers the delay window between detecting a
      trigger and the reply bubble actually appearing on screen.
 """
@@ -36,11 +39,14 @@ class Monitor:
     Runs in a daemon thread. Shares stats dict with TUI for live display.
 
     Reply-state model: whether we've already answered is read from the screen,
-    not from memory. After OCR-ing the latest received bubble and finding a
-    keyword, we check the right half BELOW that bubble for pixel variance
-    (std deviation). If the below-area has high variance (>30), a reply bubble
-    sits there → already answered → skip. If the below-area is uniform
-    (low variance), no reply exists → trigger. A per-group in-flight guard
+    not from memory. We color-match both the received-bubble color (left half,
+    #2F2F30/#EEEEF0) and the self-sent reply color (right half,
+    #9DF29F/#35D28D), then greedily pair each received bubble with the nearest
+    green reply below it (and above the next received bubble). The lowest
+    received bubble is "already replied" iff it has a paired green reply.
+    Looking for the actual reply color — instead of generic pixel variance on
+    the right half — survives interleaved messages and avoids mistaking
+    unrelated on-screen content for a reply. A per-group in-flight guard
     (keyed by the bubble's signature) prevents re-firing during the configured
     reply delay, before the reply bubble has had time to render.
     """
@@ -152,17 +158,22 @@ class Monitor:
         self.stats["status"] = "Stopped"
 
     def _analyze_region(self, screenshot):
-        """Locate the latest received bubble and check if a reply pair exists below it.
+        """Locate the lowest received bubble and check if a paired green reply exists.
 
         Strategy:
-          1. Find the bottom-most received bubble on the left half (by color #2F2F30/#EEEEF0).
-          2. Look at the right half of the image BELOW that bubble.
-          3. If the right-half below-area has high pixel variance → a reply bubble sits there
-             → the message has already been answered → skip.
-          4. If the below-area is uniform (low variance) → no reply → trigger.
+          1. Color-match received bubbles (#2F2F30/#EEEEF0) on the left half.
+          2. Color-match self-sent green replies (#9DF29F/#35D28D) on the right half.
+          3. Greedily pair each received bubble (top-to-bottom) with the nearest
+             unused green reply that sits at/after it and before the next received
+             bubble. This correctly handles interleaved messages: a reply nestled
+             between two received messages pairs with the one above it, so an
+             already-answered @all never re-triggers just because other messages
+             landed in between.
+          4. The lowest received bubble is "already replied" iff it has a pair.
 
         Returns a dict:
-          {"bubble": (x,y,w,h)|None, "bubble_bottom": int|None, "already_replied": bool}
+          {"bubble": (x,y,w,h)|None, "bubble_bottom": int|None,
+           "already_replied": bool, "reply_box": (x,y,w,h)|None}
         """
         # Pillow.screenshot → CPU numpy array.
         img_cpu = numpy.array(screenshot.convert("RGB"))
@@ -178,32 +189,55 @@ class Monitor:
             xp.all(xp.abs(diff - night) <= tol, axis=2)
             | xp.all(xp.abs(diff - day) <= tol, axis=2)
         )
-        # Transfer mask back to CPU for control-flow-heavy bubble-finding.
+        light_reply = xp.array(self._LIGHT_REPLY, dtype=xp.int16)
+        dark_reply = xp.array(self._DARK_REPLY, dtype=xp.int16)
+        reply_mask_gpu = (
+            xp.all(xp.abs(diff - light_reply) <= tol, axis=2)
+            | xp.all(xp.abs(diff - dark_reply) <= tol, axis=2)
+        )
+        # Transfer masks back to CPU for control-flow-heavy bubble-finding.
         recv_mask = xp.asnumpy(recv_mask_gpu) if hasattr(xp, "asnumpy") else recv_mask_gpu
+        reply_mask = xp.asnumpy(reply_mask_gpu) if hasattr(xp, "asnumpy") else reply_mask_gpu
 
         # ── Bubble detection on CPU (numpy, proven control-flow safety) ──
-        bubble = self._find_lowest_bubble(recv_mask[:, :w // 2], min_w=40, min_h=15)
-        bubble_bottom = bubble[1] + bubble[3] - 1 if bubble else None
+        # All received bubbles on the left half, sorted top-to-bottom by y.
+        recv_bubbles = self._find_all_bubbles(recv_mask[:, :w // 2], min_w=40, min_h=15)
+        # All green reply bubbles on the right half; shift x back to full-image
+        # coordinates so the returned boxes are usable directly.
+        reply_raw = self._find_all_bubbles(reply_mask[:, w // 2:], min_w=40, min_h=15)
+        reply_bubbles = [(x + w // 2, y, bw, bh) for (x, y, bw, bh) in reply_raw]
 
-        # ── Pair detection: is there content in the right half below the received bubble? ──
-        already_replied = False
-        reply_box = None
-        if bubble is not None and bubble_bottom is not None and bubble_bottom < h - 5:
-            below_right_gpu = img_gpu[bubble_bottom:, w // 2:]
-            if below_right_gpu.size > 0:
-                # Run std on GPU, transfer scalar result to CPU.
-                below_std = float(xp.std(below_right_gpu))
-                already_replied = below_std > 30
-                if already_replied:
-                    row_std_gpu = xp.std(below_right_gpu, axis=(1, 2))
-                    row_std = xp.asnumpy(row_std_gpu) if hasattr(xp, "asnumpy") else row_std_gpu
-                    content_rows = numpy.where(row_std > 20)[0]
-                    if len(content_rows) > 0:
-                        r_top = int(content_rows[0]) + bubble_bottom
-                        r_bottom = int(content_rows[-1]) + bubble_bottom
-                        reply_box = (w // 2, r_top, w - w // 2, r_bottom - r_top + 1)
-            else:
-                already_replied = False
+        # ── Greedy received→reply pairing ──
+        # For each received bubble (top-to-bottom), claim the nearest unused
+        # green reply whose top is at/after the received bubble's top and before
+        # the next received bubble's top. "At/after" (with a tiny tolerance)
+        # covers the case where a reply sits to the right of and roughly level
+        # with the received bubble; "before the next received bubble" ensures a
+        # reply is never stolen from the message below it.
+        reply_used: set[int] = set()
+        pairs: dict[int, tuple] = {}
+        for i, rb in enumerate(recv_bubbles):
+            next_top = recv_bubbles[i + 1][1] if i + 1 < len(recv_bubbles) else h
+            best, best_j = None, -1
+            for j, rp in enumerate(reply_bubbles):
+                if j in reply_used:
+                    continue
+                if rp[1] < rb[1] - 2:
+                    continue  # reply is above this received bubble → belongs to an earlier one
+                if rp[1] >= next_top:
+                    break  # reply_bubbles is sorted by y; rest belong to the next received bubble
+                if best is None or rp[1] < best[1]:
+                    best, best_j = rp, j
+            if best is not None:
+                pairs[i] = best
+                reply_used.add(best_j)
+
+        # The trigger candidate is the LOWEST received bubble.
+        bubble = recv_bubbles[-1] if recv_bubbles else None
+        bubble_bottom = bubble[1] + bubble[3] - 1 if bubble else None
+        lowest_idx = len(recv_bubbles) - 1 if recv_bubbles else -1
+        already_replied = lowest_idx in pairs
+        reply_box = pairs.get(lowest_idx)
 
         return {
             "bubble": bubble,
@@ -261,13 +295,55 @@ class Monitor:
 
         return None
 
+    def _find_all_bubbles(self, mask, min_w: int, min_h: int):
+        """Return all valid bubble bounding boxes in `mask`, sorted top-to-bottom.
+
+        Uses the same acceptance criteria as _find_lowest_bubble (min size +
+        target-color fill ratio) but returns every qualifying band instead of
+        just the lowest one. Needed for received→reply pairing, which must know
+        about every received bubble on screen (not only the lowest) so a reply
+        nestled between two received messages is attributed to the right one.
+
+        NOTE: mask is always a CPU numpy array — GPU→CPU transfer happens
+        in _analyze_region() before this function is called.
+        """
+        h, w = mask.shape[:2]
+        row_has = mask.any(axis=1)
+
+        bubbles = []
+        i = 0
+        while i < h:
+            if not row_has[i]:
+                i += 1
+                continue
+            # Contiguous band of target-color rows.
+            band_top = i
+            while i < h and row_has[i]:
+                i += 1
+            band_bottom = i - 1
+
+            band = mask[band_top:band_bottom + 1, :]
+            cols = numpy.where(band.any(axis=0))[0]
+            if len(cols) == 0:
+                continue
+            x_min = int(cols[0])
+            x_max = int(cols[-1])
+            bw = x_max - x_min + 1
+            bh = band_bottom - band_top + 1
+            if bw >= min_w and bh >= min_h:
+                fill = float(mask[band_top:band_bottom + 1, x_min:x_max + 1].mean())
+                if fill >= self._BUBBLE_FILL_RATIO:
+                    bubbles.append((x_min, band_top, bw, bh))
+
+        return bubbles
+
     def _scan_group(self, group: dict):
         """Scan one group's latest received bubble for trigger keywords.
 
         A trigger fires ONLY when ALL hold:
-          - the latest bottom-left bubble is found (a received message exists);
+          - the lowest bottom-left received bubble is found;
           - its OCR text contains a trigger keyword;
-          - there is NO reply content at or below that bubble on the right half —
+          - that bubble has NO paired green reply bubble on the right half —
             i.e. we haven't already answered it;
           - the message isn't currently in-flight (a reply is queued/rendering).
 
@@ -290,7 +366,9 @@ class Monitor:
 
             bx, by, bw, bh = bubble
 
-            # Flash boxes: red around received bubble, green around reply content (if any).
+            # Flash overlay: when a green reply is paired with this received
+            # bubble, draw ONE merged box around both (the whole context pair);
+            # otherwise just outline the received bubble in red.
             abs_x = region["x"] + bx
             abs_y = region["y"] + by
             reply_region = None
@@ -298,7 +376,11 @@ class Monitor:
             if rbox:
                 rbx, rby, rbw, rbh = rbox
                 reply_region = {"x": region["x"] + rbx, "y": region["y"] + rby, "w": rbw, "h": rbh}
-            self._overlay.show({"x": abs_x, "y": abs_y, "w": bw, "h": bh}, reply_region)
+            self._overlay.show(
+                {"x": abs_x, "y": abs_y, "w": bw, "h": bh},
+                reply_region,
+                paired=view.get("already_replied"),
+            )
 
             bubble_img = screenshot.crop((bx, by, bx + bw, by + bh))
 
@@ -348,7 +430,11 @@ class Monitor:
             if rbox2:
                 rbx, rby, rbw, rbh = rbox2
                 reply_region2 = {"x": region["x"] + rbx, "y": region["y"] + rby, "w": rbw, "h": rbh}
-            self._overlay.show({"x": abs_x, "y": abs_y, "w": bw, "h": bh}, reply_region2)
+            self._overlay.show(
+                {"x": abs_x, "y": abs_y, "w": bw, "h": bh},
+                reply_region2,
+                paired=view.get("already_replied"),
+            )
 
             # ── Already-replied check (second pass): re-check after exposing hidden content. ──
             if view.get("already_replied"):
