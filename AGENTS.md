@@ -71,4 +71,4 @@ pip install pyautogui pillow numpy pywin32 winocr PySide6 winotify
 - Reply settings: Enter to edit inline, Enter to confirm, Esc to cancel
 - Groups: Enter to open action sub-menu (select regions, delete)
 - Group actions: [选择消息位置] [选择输入位置] [删除] — Left/Right to switch, Enter to execute
-- Bottom row: monitoring toggle — Enter switches 已启动/已停止, Esc exits app
+- 运行状态行: 位于硬件加速下方 — Enter 切换 已启动/未启动，每次启动默认未启动

@@ -15,7 +15,7 @@ from ui.ui import (
 from core.config import Config
 from core.monitor import Monitor
 from core.region import RegionSelector
-from core.gpu import gpu_available, gpu_info, cupy_available, gpu_fallback_reason
+from core.gpu import gpu_available, cupy_available, gpu_fallback_reason
 
 
 class TUI:
@@ -46,6 +46,9 @@ class TUI:
         atexit.register(show_cursor)
         hide_cursor()
         clear_screen()
+
+        # Force monitoring OFF at startup — user must manually enable
+        self.config.set_monitoring(False)
 
         try:
             self.monitor.start()
@@ -147,7 +150,7 @@ class TUI:
             return f"{C.LABEL}硬件加速:{C.RESET} {C.RED}已禁用{C.RESET}"
         if not cupy_available:
             return f"{C.LABEL}硬件加速:{C.RESET} {C.YELLOW}已回退 CPU ({gpu_fallback_reason}){C.RESET}"
-        return f"{C.LABEL}硬件加速:{C.RESET} {C.GREEN}已启用 ({gpu_info}){C.RESET}"
+        return f"{C.LABEL}硬件加速:{C.RESET} {C.GREEN}已启用{C.RESET}"
 
     # ═══════════════════════════════════════════════════════════
     #  Main Panel
@@ -157,6 +160,7 @@ class TUI:
         s = self.monitor.stats
         groups = self.config.get_groups()
         n_groups = len(groups)
+        monitoring_on = self.config.get_monitoring()
 
         # ── Build content list to measure width ──
         items = []  # (content_str, is_selectable)
@@ -168,12 +172,22 @@ class TUI:
         # GPU acceleration status (informational)
         items.append((self._gpu_status_str(), False))
 
-        # Groups (selectable indices 0 .. n_groups-1).
+        # Running status (selectable, index 0)
+        if monitoring_on:
+            run_text = "已启动"
+            run_color = C.GREEN
+        else:
+            run_text = "未启动"
+            run_color = C.RED
+        run_status_str = f"{C.LABEL}运行状态:{C.RESET} {run_color}{run_text}{C.RESET}"
+        items.append((run_status_str, True))
+
+        # Groups (selectable indices 1 .. n_groups).
         group_render_data = []  # (name_str, opt_str); opt_str empty for non-focused
         for i, group in enumerate(groups):
             self._group_opts = ["选择消息位置", "选择输入位置", "删除"]
             name_str = f"{C.BLUE}{group['name']}{C.RESET}"
-            is_focused = (i == self.main_selected)
+            is_focused = ((i + 1) == self.main_selected)
             if is_focused and self._region_countdown_active:
                 remaining = max(0, self._region_countdown_end - time.time())
                 count = min(3, int(remaining) + 1)
@@ -191,10 +205,10 @@ class TUI:
                 opt_str = ""
             group_render_data.append((name_str, opt_str))
             items.append((name_str, True))
-        # 添加群 (selectable n_groups)
+        # 添加群 (selectable n_groups + 1)
         items.append((f"{C.WHITE}添加群{C.RESET}", True))
 
-        # Reply settings (selectable n_groups+1 .. n_groups+5)
+        # Reply settings (selectable n_groups+2 .. n_groups+6)
         reply_items = [
             ("检测内容",     self.config.get_reply("trigger", "@所有人"),    "str"),
             ("回复内容",     self.config.get_reply("content", ""),         "str"),
@@ -203,7 +217,7 @@ class TUI:
             ("扫描间隔 (秒)", str(self.config.get_reply("scan_interval", 2.0)), "float"),
         ]
         for i, (label, value, _) in enumerate(reply_items):
-            sel = (n_groups + 1 + i) == self.main_selected
+            sel = (n_groups + 2 + i) == self.main_selected
             editing = sel and self.reply_editing
             dv = self._edit_buffer if editing else value
             if editing:
@@ -233,6 +247,10 @@ class TUI:
         # GPU acceleration status (informational, not selectable)
         lines.append(self._line(items[1][0], W))
 
+        # Running status (selectable, index 0)
+        run_sel = (self.main_selected == 0)
+        lines.append(self._line_sel(items[2][0], W) if run_sel else self._line(items[2][0], W))
+
         # Group settings
         lines.append(self._divider("群设置", W))
         inner = W - 6
@@ -245,15 +263,15 @@ class TUI:
             else:
                 content = name_str
             content = pad_to(content, inner + 1)
-            sel = i == self.main_selected
+            sel = (i + 1) == self.main_selected
             if sel:
                 lines.append(f"{C.GRAY}{V}{C.BOLD}› {content} {C.GRAY}{V}{C.RESET}")
             else:
                 lines.append(f"{C.GRAY}{V}  {content} {C.GRAY}{V}{C.RESET}")
 
         # Add group
-        c, _ = items[2 + n_groups]  # 1 stat + 1 gpu + n_groups groups
-        sel = self.main_selected == n_groups
+        c, _ = items[3 + n_groups]  # 1 stat + 1 gpu + 1 run_status + n_groups groups
+        sel = self.main_selected == n_groups + 1
         if sel:
             inner = W - 6
             lines.append(f"{C.GRAY}{V}{C.BOLD}+ {pad_to(c, inner)}  {C.GRAY}{V}{C.RESET}")
@@ -263,33 +281,9 @@ class TUI:
         # Reply settings
         lines.append(self._divider("回复设置", W))
         for i in range(5):
-            c, _ = items[3 + n_groups + i]  # 1 stat + 1 gpu + n_groups groups + 1 add
-            sel = (n_groups + 1 + i) == self.main_selected
+            c, _ = items[4 + n_groups + i]  # 1 stat + 1 gpu + 1 run_status + n_groups groups + 1 add
+            sel = (n_groups + 2 + i) == self.main_selected
             lines.append(self._line_sel(c, W) if sel else self._line(c, W))
-
-        # Spacer + monitoring toggle (replaces old "exit")
-        lines.append(self._line("", W))
-        inner = W - 6
-        monitoring_on = self.config.get_monitoring()
-        running = self.monitor.stats.get("running", False)
-        if monitoring_on:
-            if running and self.monitor.stats.get("status") == "启动中":
-                toggle_text = f"{C.YELLOW}启动中{C.RESET}"
-            else:
-                toggle_text = f"{C.GREEN}已启动{C.RESET}"
-        else:
-            toggle_text = f"{C.RED}已停止{C.RESET}"
-        toggle_idx = n_groups + 6  # 0..n_groups-1 groups, n_groups add, n_groups+1..+5 reply
-        toggle_sel = self.main_selected == toggle_idx
-        tw = get_display_width(toggle_text)
-        sp = max(0, inner - tw)
-        if toggle_sel:
-            lsp = max(0, sp - 2)
-            el = f"{C.GRAY}{V}  {' ' * lsp}{C.BOLD}› {toggle_text}  {C.GRAY}{V}{C.RESET}"
-            lines.append(el)
-        else:
-            el = f"{C.GRAY}{V}  {' ' * sp}{toggle_text}  {C.GRAY}{V}{C.RESET}"
-            lines.append(el)
 
         lines.append(self._bottom_border(W))
         return lines
@@ -308,11 +302,11 @@ class TUI:
     def _handle_main(self, key: bytes):
         groups = self.config.get_groups()
         n_groups = len(groups)
-        n = n_groups + 7  # groups + add + 5 reply + toggle
+        n = n_groups + 7  # run_status + groups + add + 5 reply
 
         # ── Group row: Left/Right switches action (3 opt), Enter executes ──
-        if 0 <= self.main_selected < n_groups:
-            gi = self.main_selected
+        if 1 <= self.main_selected <= n_groups:
+            gi = self.main_selected - 1
             act_idx = self._group_action_indices.get(gi, 0)
             if key == K.LEFT:
                 self._group_action_indices[gi] = (act_idx - 1) % 3
@@ -329,14 +323,14 @@ class TUI:
         elif key == K.DOWN:
             self.main_selected = (self.main_selected + 1) % n
         elif key == K.ENTER:
-            if n_groups + 1 <= self.main_selected < n_groups + 6:
+            if n_groups + 2 <= self.main_selected < n_groups + 7:
                 self.reply_editing = True
                 self._start_reply_edit()
-            elif self.main_selected == n_groups:
+            elif self.main_selected == n_groups + 1:
                 self._add_group()
                 new_n = len(self.config.get_groups()) + 7
                 self.main_selected = min(self.main_selected, new_n - 1)
-            elif self.main_selected == n_groups + 6:
+            elif self.main_selected == 0:
                 self.config.toggle_monitoring()
         elif key == K.ESC or key == b"\x08":
             self.running = False
@@ -361,7 +355,7 @@ class TUI:
             self._group_action_indices = new_indices
             n = len(self.config.get_groups()) + 7
             self.main_selected = min(self.main_selected, max(0, n - 1))
-        # Per-group toggle removed; global monitoring toggle is now at the bottom.
+        # Monitoring toggle moved to selectable index 0 (below hardware acceleration).
 
     # ── Reply editing ──
 
@@ -369,7 +363,7 @@ class TUI:
         self._edit_buffer = ""
         self._edit_cursor = 0
         keys = ["trigger", "content", "delay_min", "delay_max", "scan_interval"]
-        ri = self.main_selected - (len(self.config.get_groups()) + 1)
+        ri = self.main_selected - (len(self.config.get_groups()) + 2)
         if 0 <= ri < len(keys):
             val = self.config.get_reply(keys[ri], "")
             self._edit_buffer = str(val)
@@ -393,7 +387,7 @@ class TUI:
 
     def _commit_reply_edit(self):
         keys = ["trigger", "content", "delay_min", "delay_max", "scan_interval"]
-        ri = self.main_selected - (len(self.config.get_groups()) + 1)
+        ri = self.main_selected - (len(self.config.get_groups()) + 2)
         if ri < 0 or ri >= len(keys):
             return
         key = keys[ri]
