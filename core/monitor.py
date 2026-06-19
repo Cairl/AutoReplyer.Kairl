@@ -422,9 +422,12 @@ class Monitor:
 
             # Click the message bubble to focus the chat window and expose any hidden
             # reply content or input area that may be covering the pair-detection region.
+            # Use MIDDLE click so we focus the window without selecting text — left-click
+            # selects the message text, changing the bubble's background colour and
+            # potentially throwing off the colour-based pair detection.
             abs_center_x = region["x"] + bx + bw // 2
             abs_center_y = region["y"] + by + bh // 2
-            pyautogui.click(abs_center_x, abs_center_y)
+            pyautogui.click(abs_center_x, abs_center_y, button="middle")
 
             # Re-screenshot and re-analyze: the click may have revealed a previously
             # obscured reply bubble, which would change the already_replied result.
