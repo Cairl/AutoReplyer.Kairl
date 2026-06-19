@@ -11,6 +11,7 @@ from pathlib import Path
 CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 
 DEFAULT_CONFIG = {
+    "monitoring": True,   # global monitoring on/off (persists across restarts)
     "reply": {
         "trigger": "@所有人",
         "content": "收到",
@@ -91,6 +92,20 @@ class Config:
                 pass
 
     # ── Convenience accessors ──
+
+    def get_monitoring(self) -> bool:
+        """Global monitoring on/off (top-level config field, persisted)."""
+        return bool(self.data.get("monitoring", True))
+
+    def set_monitoring(self, value: bool):
+        self.data["monitoring"] = bool(value)
+        self._save()
+
+    def toggle_monitoring(self) -> bool:
+        """Flip global monitoring; returns the new state."""
+        new_val = not self.get_monitoring()
+        self.set_monitoring(new_val)
+        return new_val
 
     def get_reply(self, key: str, default=None):
         return self.data.get("reply", {}).get(key, default)

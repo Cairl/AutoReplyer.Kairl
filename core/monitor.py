@@ -3,20 +3,27 @@ Background OCR monitor: scans the latest received bubble for trigger keywords, a
 
 Detection logic:
   1. Screenshot the group's message_region.
-  2. Locate the bottom-left chat bubble by color:
+  2. Locate the bottom-most received bubble on the left half by color:
        night mode #2F2F30 (47,47,48) / day mode #EEEEF0 (238,238,240).
-  3. OCR only that bubble (the latest received message).
-  4. If a trigger keyword matches AND this message hasn't been replied yet,
-     auto-reply once. Per-message hash dedup guarantees exactly one reply.
+  3. Check the right half BELOW that bubble: high pixel std deviation means a
+     reply bubble already sits there (already answered → skip); low variance
+     means no reply yet → trigger.
+  4. OCR only the latest received bubble.
+  5. A trigger fires ONLY when that bubble contains a keyword AND the
+     below-area is blank (i.e. we haven't already replied to it).
+     A short-lived in-flight guard covers the delay window between detecting a
+     trigger and the reply bubble actually appearing on screen.
 """
 
 import time
 import threading
+import hashlib
 from datetime import datetime
 
 import pyautogui
 
 from core.config import Config
+from core.overlay import RegionOverlay
 
 
 class Monitor:
@@ -24,17 +31,34 @@ class Monitor:
     Background OCR monitor: scans the latest received bubble for trigger keywords, auto-replies.
     Runs in a daemon thread. Shares stats dict with TUI for live display.
 
-    Dedup model: per group, the md5 hash of the last replied bubble text is kept.
-    A trigger fires only when the current bottom-left bubble's text hash differs
-    from the stored one — guaranteeing each trigger message gets exactly one reply,
-    no stale replies, no duplicate replies.
+    Reply-state model: whether we've already answered is read from the screen,
+    not from memory. After OCR-ing the latest received bubble and finding a
+    keyword, we check the right half BELOW that bubble for pixel variance
+    (std deviation). If the below-area has high variance (>30), a reply bubble
+    sits there → already answered → skip. If the below-area is uniform
+    (low variance), no reply exists → trigger. A per-group in-flight guard
+    (keyed by the bubble's signature) prevents re-firing during the configured
+    reply delay, before the reply bubble has had time to render.
     """
+
+    # Received-message bubble colors.
+    _NIGHT_RECV = (47, 47, 48)      # #2F2F30
+    _DAY_RECV = (238, 238, 240)     # #EEEEF0
+    # Self-sent reply bubble colors.
+    _LIGHT_REPLY = (157, 242, 159)  # #9DF29F
+    _DARK_REPLY = (53, 210, 141)    # #35D28D
+    # Min target-color fill ratio inside a candidate box for it to count as a
+    # chat bubble: a bubble is a solid rounded rect of text background, so the
+    # color must cover most of its bounding box (text occupies only a small
+    # fraction). Scattered dots, thin lines and icons fall well below this.
+    _BUBBLE_FILL_RATIO = 0.5
 
     def __init__(self, config: Config):
         self.config = config
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._ocr_engine = None
+        self._overlay = RegionOverlay()
 
         # Shared stats (read by TUI)
         self.stats = {
@@ -44,11 +68,13 @@ class Monitor:
             "replies": 0,
             "errors": 0,
             "last_trigger": "N/A",
-            "last_reply": "N/A",
+            "reply_elapsed": None,
             "status": "空闲"
         }
-        # group_name -> md5 hex of last replied bubble text
-        self._last_replied_hash: dict[str, str] = {}
+        # group_name -> {signature: expiry_timestamp}: in-flight trigger guard.
+        # Keeps a trigger from firing again before its green reply bubble renders.
+        self._inflight: dict[str, dict[str, float]] = {}
+
 
     def _init_ocr(self):
         """Lazy-init winocr."""
@@ -63,6 +89,7 @@ class Monitor:
         if self.stats["running"]:
             return
         self._init_ocr()
+        self._overlay.start()
         self._stop_event.clear()
         self.stats["running"] = True
         self.stats["status"] = "启动中..."
@@ -77,6 +104,7 @@ class Monitor:
         self.stats["status"] = "正在停止..."
         if self._thread:
             self._thread.join(timeout=5)
+        self._overlay.stop()
         self.stats["status"] = "Stopped"
         self._thread = None
 
@@ -89,6 +117,13 @@ class Monitor:
                 self.config.hot_reload()
                 scan_interval = self.config.get_reply("scan_interval", 2.0)
                 groups = self.config.get_groups()
+
+                # Global monitoring master switch (toggled from the top of the
+                # TUI; persisted in config.json). When off, no scanning happens.
+                if not self.config.get_monitoring():
+                    self.stats["status"] = "已暂停"
+                    self.stats["scans"] += 1
+                    continue  # bottom-of-loop wait handles the scan interval
 
                 for i, group in enumerate(groups):
                     if self._stop_event.is_set():
@@ -110,78 +145,120 @@ class Monitor:
 
         self.stats["status"] = "Stopped"
 
-    def _find_bottom_left_bubble(self, screenshot):
-        """Locate the bottom-most left-side chat bubble by color.
+    def _analyze_region(self, screenshot):
+        """Locate the latest received bubble and check if a reply pair exists below it.
 
-        WeChat received-message bubble colors:
-          - Night mode: #2F2F30 = (47, 47, 48)
-          - Day mode:   #EEEEF0 = (238, 238, 240)
-        Both colors are matched simultaneously; whichever is present is used.
-        Only the left half of the region is scanned (received messages are
-        left-aligned; sent messages are right-aligned and thus excluded).
+        Strategy:
+          1. Find the bottom-most received bubble on the left half (by color #2F2F30/#EEEEF0).
+          2. Look at the right half of the image BELOW that bubble.
+          3. If the right-half below-area has high pixel variance → a reply bubble sits there
+             → the message has already been answered → skip.
+          4. If the below-area is uniform (low variance) → no reply → trigger.
 
-        Returns (x, y, w, h) relative to the screenshot, or None if no bubble.
+        Returns a dict:
+          {"bubble": (x,y,w,h)|None, "bubble_bottom": int|None, "already_replied": bool}
         """
         try:
             import numpy as np
         except ImportError:
-            raise RuntimeError("numpy 未安装，请运行: pip install numpy")
+            raise RuntimeError("numpy not installed: pip install numpy")
 
         img = np.array(screenshot.convert("RGB"))
         h, w = img.shape[:2]
-
-        night = np.array([47, 47, 48], dtype=np.int16)
-        day = np.array([238, 238, 240], dtype=np.int16)
         tol = 8
-
         diff = img.astype(np.int16)
-        mask = (
+
+        # ── Received bubble (left half) ──
+        night = np.array(self._NIGHT_RECV, dtype=np.int16)
+        day = np.array(self._DAY_RECV, dtype=np.int16)
+        recv_mask = (
             np.all(np.abs(diff - night) <= tol, axis=2)
             | np.all(np.abs(diff - day) <= tol, axis=2)
         )
+        bubble = self._find_lowest_bubble(recv_mask[:, :w // 2], min_w=40, min_h=15)
+        bubble_bottom = bubble[1] + bubble[3] - 1 if bubble else None
 
-        # Left half only — filters out self-sent (right-side) bubbles.
-        half_w = w // 2
-        left_mask = mask[:, :half_w]
-        row_has = left_mask.any(axis=1)
+        # ── Pair detection: is there content in the right half below the received bubble? ──
+        already_replied = False
+        if bubble is not None and bubble_bottom is not None and bubble_bottom < h - 5:
+            # Crop right half, from below the received bubble to the bottom of the image.
+            below_right = img[bubble_bottom:, w // 2:]
+            if below_right.size > 0:
+                # High std deviation = significant visual content = a reply bubble exists.
+                below_std = float(np.std(below_right))
+                already_replied = below_std > 30
+            else:
+                # Edge case: received bubble is at the very bottom → no room for a reply.
+                already_replied = False
 
-        rows_with = np.where(row_has)[0]
-        if len(rows_with) == 0:
-            return None
+        return {
+            "bubble": bubble,
+            "bubble_bottom": bubble_bottom,
+            "already_replied": already_replied,
+        }
 
-        bottom = int(rows_with[-1])
+    def _find_lowest_bubble(self, mask, min_w: int, min_h: int):
+        """Return the bounding box of the lowest valid chat bubble in `mask`.
 
-        # Walk upward through the continuous band to find the bubble's top.
-        top = bottom
-        while top > 0 and row_has[top - 1]:
-            top -= 1
+        Scans row-bands from the bottom up. For each contiguous band of target
+        rows, builds the band's horizontal bounding box and accepts it only if:
+          - the box meets min_w × min_h, AND
+          - the target color covers >= _BUBBLE_FILL_RATIO of the box area
+            (a chat bubble's text-background color fills most of its box;
+            thin lines / icons / scattered noise do not).
 
-        # Horizontal extent of this band within the left half.
-        band = left_mask[top:bottom + 1, :]
-        cols = np.where(band.any(axis=0))[0]
-        if len(cols) == 0:
-            return None
+        The first band from the bottom that passes is returned — so a thin line
+        of noise sitting below the real bubble is skipped in favor of the bubble
+        above it. Returns (x, y, w, h) or None.
+        """
+        import numpy as np
 
-        x_min = int(cols[0])
-        x_max = int(cols[-1])
-        bw = x_max - x_min + 1
-        bh = bottom - top + 1
+        h, w = mask.shape[:2]
+        row_has = mask.any(axis=1)
 
-        # Reject tiny noise patches.
-        if bw < 40 or bh < 15:
-            return None
+        bottom = h - 1
+        while bottom >= 0:
+            if not row_has[bottom]:
+                bottom -= 1
+                continue
+            # This row has target pixels → find the band it belongs to.
+            band_bottom = bottom
+            band_top = band_bottom
+            while band_top > 0 and row_has[band_top - 1]:
+                band_top -= 1
 
-        return (x_min, top, bw, bh)
+            # Horizontal extent across the whole band.
+            band = mask[band_top:band_bottom + 1, :]
+            cols = np.where(band.any(axis=0))[0]
+            if len(cols) > 0:
+                x_min = int(cols[0])
+                x_max = int(cols[-1])
+                bw = x_max - x_min + 1
+                bh = band_bottom - band_top + 1
+                if bw >= min_w and bh >= min_h:
+                    fill = float(mask[band_top:band_bottom + 1, x_min:x_max + 1].mean())
+                    if fill >= self._BUBBLE_FILL_RATIO:
+                        return (x_min, band_top, bw, bh)
+
+            # Band didn't qualify → continue searching above it.
+            bottom = band_top - 1
+
+        return None
 
     def _scan_group(self, group: dict):
         """Scan one group's latest received bubble for trigger keywords.
 
-        Only the bottom-left bubble is OCR'd. A trigger fires at most once per
-        unique bubble text (md5 dedup), so the same on-screen message never
-        triggers twice and stale messages are never re-replied.
-        """
-        import hashlib
+        A trigger fires ONLY when ALL hold:
+          - the latest bottom-left bubble is found (a received message exists);
+          - its OCR text contains a trigger keyword;
+          - there is NO reply content at or below that bubble on the right half —
+            i.e. we haven't already answered it;
+          - the message isn't currently in-flight (a reply is queued/rendering).
 
+        Reading "have I replied?" from the screen (rather than from a memory of
+        past texts) avoids re-replying to stale on-screen messages and correctly
+        re-replies when the same keyword is sent again after we've answered.
+        """
         region = group["message_region"]
         name = group["name"]
 
@@ -190,18 +267,27 @@ class Monitor:
                 region["x"], region["y"], region["w"], region["h"]
             ))
 
-            bubble = self._find_bottom_left_bubble(screenshot)
+            view = self._analyze_region(screenshot)
+            bubble = view["bubble"]
             if bubble is None:
                 return
 
             bx, by, bw, bh = bubble
+
+            # Flash box: red around received bubble.
+            # Convert relative (screenshot-local) coords to absolute screen
+            # coords (physical pixels) that the overlay expects.
+            abs_x = region["x"] + bx
+            abs_y = region["y"] + by
+            self._overlay.show({"x": abs_x, "y": abs_y, "w": bw, "h": bh})
+
             bubble_img = screenshot.crop((bx, by, bx + bw, by + bh))
 
             result = self._ocr_engine.recognize_pil_sync(bubble_img, "zh-Hans-CN")
             # winocr returns a dict, not an object — use .get() not getattr()
             text = result.get("text", "") if isinstance(result, dict) else getattr(result, "text", "")
             text = (text or "").strip()
-            text = " ".join(text.split())  # normalize whitespace for stable hashing
+            text = " ".join(text.split())
 
             if not text:
                 return
@@ -211,15 +297,55 @@ class Monitor:
             if not any(pat in text for pat in patterns):
                 return
 
-            # Dedup: exactly one reply per unique trigger message.
-            text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
-            if text_hash == self._last_replied_hash.get(name):
-                return  # already replied to this exact message
+            # Click the message bubble to focus the chat window and expose any hidden
+            # reply content or input area that may be covering the pair-detection region.
+            abs_center_x = region["x"] + bx + bw // 2
+            abs_center_y = region["y"] + by + bh // 2
+            pyautogui.click(abs_center_x, abs_center_y)
 
-            self._last_replied_hash[name] = text_hash
+            # Re-screenshot and re-analyze: the click may have revealed a previously
+            # obscured reply bubble, which would change the already_replied result.
+            screenshot2 = pyautogui.screenshot(region=(
+                region["x"], region["y"], region["w"], region["h"]
+            ))
+            view = self._analyze_region(screenshot2)
+            new_bubble = view["bubble"]
+            if new_bubble is None:
+                return
+            # Update bubble coords in case the view shifted slightly after click.
+            bx, by, bw, bh = new_bubble
+
+            # Update overlay with new bubble position.
+            abs_x = region["x"] + bx
+            abs_y = region["y"] + by
+            self._overlay.show({"x": abs_x, "y": abs_y, "w": bw, "h": bh})
+
+            # ── Already-replied check: is there a reply bubble BELOW this received bubble? ──
+            if view.get("already_replied"):
+                sig = self._bubble_signature(bubble, text)
+                self._inflight.get(name, {}).pop(sig, None)
+                return
+
+            # ── In-flight guard: a reply for this exact message is already pending. ──
+            sig = self._bubble_signature(bubble, text)
+            now = time.time()
+            inflight = self._inflight.setdefault(name, {})
+
+            # Clean expired entries from inflight.
+            inflight.pop(next((k for k, exp in list(inflight.items()) if exp <= now), None), None)
+
+            if sig in inflight:
+                return  # reply already queued/rendering for this message
+
+            # Mark in-flight; auto-clear after a generous window covering the reply
+            # delay plus time for the green bubble to render on screen.
+            delay_max = float(self.config.get_reply("delay_max", 3.0))
+            inflight[sig] = now + delay_max + 5.0
+
+            self.stats["_trigger_time"] = time.time()
             self.stats["triggers"] += 1
-            now = datetime.now()
-            self.stats["last_trigger"] = f"{name} @ {now.strftime('%H:%M:%S')}.{now.strftime('%f')[:3]}"
+            ts = datetime.now()
+            self.stats["last_trigger"] = f"{name} @ {ts.strftime('%H:%M:%S')}.{ts.strftime('%f')[:3]}"
 
             if group.get("reply_region"):
                 self._auto_reply(group)
@@ -227,6 +353,17 @@ class Monitor:
         except Exception as e:
             self.stats["errors"] += 1
             self.stats["status"] = f"扫描错误 ({name}): {type(e).__name__}: {str(e)[:30]}"
+
+    @staticmethod
+    def _bubble_signature(bubble, text):
+        """Stable per-message signature for the in-flight guard.
+
+        Binds the trigger bubble's on-screen position (so a new, later message
+        with the same text still fires) to its OCR text (so the same bubble
+        moving slightly between scans is treated as one)."""
+        bx, by, bw, bh = bubble
+        row_bucket = by // 4  # tolerate small vertical jitter
+        return hashlib.md5(f"{row_bucket}|{bw}|{bh}|{text}".encode("utf-8")).hexdigest()
 
     def _auto_reply(self, group: dict):
         """Send auto-reply to a group's reply region."""
@@ -261,10 +398,35 @@ class Monitor:
             pyautogui.press("enter")
 
             self.stats["replies"] += 1
-            now = datetime.now()
-            self.stats["last_reply"] = f"{group['name']} @ {now.strftime('%H:%M:%S')}.{now.strftime('%f')[:3]}"
+            self.stats["reply_elapsed"] = time.time() - self.stats.get("_trigger_time", time.time())
             self.stats["status"] = f"已回复 {group['name']}"
+
+            # Send Windows notification
+            self._notify(group["name"], content)
 
         except Exception as e:
             self.stats["errors"] += 1
             self.stats["status"] = f"回复错误: {str(e)[:30]}"
+
+    @staticmethod
+    def _notify(group_name: str, content: str):
+        """Show a Windows balloon notification after replying."""
+        import subprocess
+        try:
+            subprocess.Popen(
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    f"Add-Type -AssemblyName System.Windows.Forms; "
+                    f"$n = New-Object System.Windows.Forms.NotifyIcon; "
+                    f"$n.Icon = [System.Drawing.SystemIcons]::Information; "
+                    f"$n.BalloonTipTitle = 'AutoReplyer.Kairl'; "
+                    f"$n.BalloonTipText = '已回复 {group_name}: {content}'; "
+                    f"$n.Visible = $true; "
+                    f"$n.ShowBalloonTip(5000); "
+                    f"Start-Sleep -Seconds 6; "
+                    f"$n.Dispose()"
+                ],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass  # notification is best-effort

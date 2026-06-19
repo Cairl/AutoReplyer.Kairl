@@ -149,13 +149,14 @@ class TUI:
         # ── Build content list to measure width ──
         items = []  # (content_str, is_selectable)
 
-        items.append((f"{C.LABEL}最后触发{C.RESET}     {C.PEACH}{s['last_trigger']}{C.RESET}", False))
-        items.append((f"{C.LABEL}最后回复{C.RESET}     {C.PEACH}{s['last_reply']}{C.RESET}", False))
+        trigger = s['last_trigger']
+        elapsed_str = f"{s['reply_elapsed']:.1f} 秒" if s.get("reply_elapsed") is not None else "N/A"
+        items.append((f"{C.LABEL}最后触发:{C.RESET} {C.PEACH}{trigger}{C.RESET} {C.LABEL}用时{C.RESET} {C.PEACH}{elapsed_str}{C.RESET}", False))
 
-        group_selectables = []
-        self._group_opts = ["选择消息位置", "选择输入位置", "删除"]
+        # Groups (selectable indices 0 .. n_groups-1).
         group_render_data = []  # (name_str, opt_str); opt_str empty for non-focused
         for i, group in enumerate(groups):
+            self._group_opts = ["选择消息位置", "选择输入位置", "删除"]
             name_str = f"{C.BLUE}{group['name']}{C.RESET}"
             is_focused = (i == self.main_selected)
             if is_focused and self._region_countdown_active:
@@ -175,11 +176,10 @@ class TUI:
                 opt_str = ""
             group_render_data.append((name_str, opt_str))
             items.append((name_str, True))
-            group_selectables.append(4 + i)
         # 添加群 (selectable n_groups)
         items.append((f"{C.WHITE}添加群{C.RESET}", True))
 
-        # Reply settings (selectable n_groups+1 ~ n_groups+5)
+        # Reply settings (selectable n_groups+1 .. n_groups+5)
         reply_items = [
             ("检测内容",     self.config.get_reply("trigger", "@所有人"),    "str"),
             ("回复内容",     self.config.get_reply("content", ""),         "str"),
@@ -213,12 +213,12 @@ class TUI:
         lines.append(self._top_border("AutoReplyer.Kairl", W))
 
         # Stats (not selectable)
-        for c, _ in items[:2]:
-            lines.append(self._line(c, W))
+        lines.append(self._line(items[0][0], W))
 
         # Group settings
         lines.append(self._divider("群设置", W))
         inner = W - 6
+
         for i in range(n_groups):
             name_str, opt_str = group_render_data[i]
             if opt_str:
@@ -234,7 +234,7 @@ class TUI:
                 lines.append(f"{C.GRAY}{V}  {content} {C.GRAY}{V}{C.RESET}")
 
         # Add group
-        c, _ = items[2 + n_groups]
+        c, _ = items[1 + n_groups]  # 1 stat + n_groups groups = 1+n_groups
         sel = self.main_selected == n_groups
         if sel:
             inner = W - 6
@@ -245,24 +245,28 @@ class TUI:
         # Reply settings
         lines.append(self._divider("回复设置", W))
         for i in range(5):
-            c, _ = items[3 + n_groups + i]
+            c, _ = items[2 + n_groups + i]  # 1 stat + n_groups groups + 1 add
             sel = (n_groups + 1 + i) == self.main_selected
             lines.append(self._line_sel(c, W) if sel else self._line(c, W))
 
-        # Spacer + exit
+        # Spacer + monitoring toggle (replaces old "exit")
         lines.append(self._line("", W))
-        exit_idx = n_groups + 6
-        exit_sel = self.main_selected == exit_idx
-        et = "退出"
-        ew = get_display_width(et)
         inner = W - 6
-        sp = max(0, inner - ew)
-        if exit_sel:
+        monitoring_on = self.config.get_monitoring()
+        if monitoring_on:
+            toggle_text = f"{C.GREEN}开启监控{C.RESET}"
+        else:
+            toggle_text = f"{C.RED}停止监控{C.RESET}"
+        toggle_idx = n_groups + 6  # 0..n_groups-1 groups, n_groups add, n_groups+1..+5 reply
+        toggle_sel = self.main_selected == toggle_idx
+        tw = get_display_width(toggle_text)
+        sp = max(0, inner - tw)
+        if toggle_sel:
             lsp = max(0, sp - 2)
-            el = f"{C.GRAY}{V}  {' ' * lsp}{C.BOLD}› {C.SUBTEXT}{et}{C.RESET}  {C.GRAY}{V}{C.RESET}"
+            el = f"{C.GRAY}{V}  {' ' * lsp}{C.BOLD}› {toggle_text}  {C.GRAY}{V}{C.RESET}"
             lines.append(el)
         else:
-            el = f"{C.GRAY}{V}  {' ' * sp}{C.SUBTEXT}{et}{C.RESET}  {C.GRAY}{V}{C.RESET}"
+            el = f"{C.GRAY}{V}  {' ' * sp}{toggle_text}  {C.GRAY}{V}{C.RESET}"
             lines.append(el)
 
         lines.append(self._bottom_border(W))
@@ -282,9 +286,9 @@ class TUI:
     def _handle_main(self, key: bytes):
         groups = self.config.get_groups()
         n_groups = len(groups)
-        n = n_groups + 7  # groups + add + 5 reply + exit
+        n = n_groups + 7  # groups + add + 5 reply + toggle
 
-        # ── Group row: Left/Right switches action, Enter executes ──
+        # ── Group row: Left/Right switches action (3 opt), Enter executes ──
         if 0 <= self.main_selected < n_groups:
             gi = self.main_selected
             act_idx = self._group_action_indices.get(gi, 0)
@@ -310,8 +314,8 @@ class TUI:
                 self._add_group()
                 new_n = len(self.config.get_groups()) + 7
                 self.main_selected = min(self.main_selected, new_n - 1)
-            else:
-                self.running = False
+            elif self.main_selected == n_groups + 6:
+                self.config.toggle_monitoring()
         elif key == K.ESC or key == b"\x08":
             self.running = False
 
@@ -335,6 +339,7 @@ class TUI:
             self._group_action_indices = new_indices
             n = len(self.config.get_groups()) + 7
             self.main_selected = min(self.main_selected, max(0, n - 1))
+        # Per-group toggle removed; global monitoring toggle is now at the bottom.
 
     # ── Reply editing ──
 
