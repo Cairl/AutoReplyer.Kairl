@@ -218,7 +218,8 @@ class Monitor:
 
             self._last_replied_hash[name] = text_hash
             self.stats["triggers"] += 1
-            self.stats["last_trigger"] = f"{name} @ {datetime.now().strftime('%H:%M:%S')}"
+            now = datetime.now()
+            self.stats["last_trigger"] = f"{name} @ {now.strftime('%H:%M:%S')}.{now.strftime('%f')[:3]}"
 
             if group.get("reply_region"):
                 self._auto_reply(group)
@@ -260,7 +261,8 @@ class Monitor:
             pyautogui.press("enter")
 
             self.stats["replies"] += 1
-            self.stats["last_reply"] = f"{group['name']} @ {datetime.now().strftime('%H:%M:%S')}"
+            now = datetime.now()
+            self.stats["last_reply"] = f"{group['name']} @ {now.strftime('%H:%M:%S')}.{now.strftime('%f')[:3]}"
             self.stats["status"] = f"已回复 {group['name']}"
 
         except Exception as e:

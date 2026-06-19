@@ -11,10 +11,10 @@
       "name": "群 1",
       "enabled": true,
       "message_region": {
-        "x": 21,
-        "y": 290,
+        "x": 15,
+        "y": 293,
         "w": 1289,
-        "h": 1282
+        "h": 1284
       },
       "reply_region": {
         "x": 41,

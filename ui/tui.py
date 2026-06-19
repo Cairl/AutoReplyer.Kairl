@@ -149,27 +149,27 @@ class TUI:
         # ── Build content list to measure width ──
         items = []  # (content_str, is_selectable)
 
-        items.append((f"{C.DIM}最后触发{C.RESET}     {C.WHITE}{s['last_trigger']}{C.RESET}", False))
-        items.append((f"{C.DIM}最后回复{C.RESET}     {C.WHITE}{s['last_reply']}{C.RESET}", False))
+        items.append((f"{C.LABEL}最后触发{C.RESET}     {C.PEACH}{s['last_trigger']}{C.RESET}", False))
+        items.append((f"{C.LABEL}最后回复{C.RESET}     {C.PEACH}{s['last_reply']}{C.RESET}", False))
 
         group_selectables = []
         self._group_opts = ["选择消息位置", "选择输入位置", "删除"]
         group_render_data = []  # (name_str, opt_str); opt_str empty for non-focused
         for i, group in enumerate(groups):
-            name_str = f"{C.WHITE}{group['name']}{C.RESET}"
+            name_str = f"{C.BLUE}{group['name']}{C.RESET}"
             is_focused = (i == self.main_selected)
             if is_focused and self._region_countdown_active:
                 remaining = max(0, self._region_countdown_end - time.time())
                 count = min(3, int(remaining) + 1)
-                opt_str = f"{C.YELLOW}{C.BOLD}{count} 秒后截取{C.RESET}"
+                opt_str = f"{C.PEACH}{C.BOLD}{count} 秒后截取{C.RESET}"
             elif is_focused:
                 act_idx = self._group_action_indices.get(i, 0)
                 parts = []
                 for j, opt in enumerate(self._group_opts):
                     if j == act_idx:
-                        parts.append(f"{C.SUBTEXT}[{opt}]{C.RESET}")
+                        parts.append(f"{C.BOLD}{C.WHITE}[{C.RESET}{C.BOLD}{C.TEAL}{opt}{C.RESET}{C.BOLD}{C.WHITE}]{C.RESET}")
                     else:
-                        parts.append(f"{C.SUBTEXT} {opt} {C.RESET}")
+                        parts.append(f"{C.TEAL} {opt} {C.RESET}")
                 opt_str = "".join(parts)
             else:
                 opt_str = ""
@@ -192,11 +192,11 @@ class TUI:
             editing = sel and self.reply_editing
             dv = self._edit_buffer if editing else value
             if editing:
-                items.append((f"{C.WHITE}{label}:{C.RESET} {C.YELLOW}{dv}_{C.RESET}", True))
+                items.append((f"{C.LABEL}{label}:{C.RESET} {C.YELLOW}{dv}_{C.RESET}", True))
             elif sel:
-                items.append((f"{C.WHITE}{label}:{C.RESET} {C.GREEN}{value}{C.RESET}", True))
+                items.append((f"{C.LABEL}{label}:{C.RESET} {C.GREEN}{value}{C.RESET}", True))
             else:
-                items.append((f"{C.WHITE}{label}:{C.RESET} {C.WHITE}{value}{C.RESET}", True))
+                items.append((f"{C.LABEL}{label}:{C.RESET} {C.WHITE}{value}{C.RESET}", True))
 
         # ── Calculate W ──
         max_w = max(get_display_width(c) for c, _ in items)
@@ -259,10 +259,10 @@ class TUI:
         sp = max(0, inner - ew)
         if exit_sel:
             lsp = max(0, sp - 2)
-            el = f"{C.GRAY}{V}  {' ' * lsp}{C.BOLD}› {C.WHITE}{et}{C.RESET}  {C.GRAY}{V}{C.RESET}"
+            el = f"{C.GRAY}{V}  {' ' * lsp}{C.BOLD}› {C.SUBTEXT}{et}{C.RESET}  {C.GRAY}{V}{C.RESET}"
             lines.append(el)
         else:
-            el = f"{C.GRAY}{V}  {' ' * sp}{C.WHITE}{et}{C.RESET}  {C.GRAY}{V}{C.RESET}"
+            el = f"{C.GRAY}{V}  {' ' * sp}{C.SUBTEXT}{et}{C.RESET}  {C.GRAY}{V}{C.RESET}"
             lines.append(el)
 
         lines.append(self._bottom_border(W))
