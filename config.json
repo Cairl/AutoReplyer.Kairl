@@ -3,7 +3,7 @@
     "content": "2",
     "delay_min": 0.0,
     "delay_max": 0.0,
-    "scan_interval": 0.5,
+    "scan_interval": 0.1,
     "trigger": "@所有人"
   },
   "groups": [

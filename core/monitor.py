@@ -92,7 +92,7 @@ class Monitor:
         self._overlay.start()
         self._stop_event.clear()
         self.stats["running"] = True
-        self.stats["status"] = "启动中..."
+        self.stats["status"] = "启动中"
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
@@ -110,6 +110,8 @@ class Monitor:
 
     def _run_loop(self):
         """Main monitoring loop. Runs in daemon thread."""
+        self.stats["status"] = "启动中"
+        time.sleep(3)
         self.stats["status"] = "运行中"
 
         while not self._stop_event.is_set():
@@ -180,6 +182,7 @@ class Monitor:
 
         # ── Pair detection: is there content in the right half below the received bubble? ──
         already_replied = False
+        reply_box = None
         if bubble is not None and bubble_bottom is not None and bubble_bottom < h - 5:
             # Crop right half, from below the received bubble to the bottom of the image.
             below_right = img[bubble_bottom:, w // 2:]
@@ -187,6 +190,14 @@ class Monitor:
                 # High std deviation = significant visual content = a reply bubble exists.
                 below_std = float(np.std(below_right))
                 already_replied = below_std > 30
+                # If replied, locate the reply content bounding box for visual overlay.
+                if already_replied:
+                    row_std = np.std(below_right, axis=(1, 2))
+                    content_rows = np.where(row_std > 20)[0]
+                    if len(content_rows) > 0:
+                        r_top = int(content_rows[0]) + bubble_bottom
+                        r_bottom = int(content_rows[-1]) + bubble_bottom
+                        reply_box = (w // 2, r_top, w - w // 2, r_bottom - r_top + 1)
             else:
                 # Edge case: received bubble is at the very bottom → no room for a reply.
                 already_replied = False
@@ -195,6 +206,7 @@ class Monitor:
             "bubble": bubble,
             "bubble_bottom": bubble_bottom,
             "already_replied": already_replied,
+            "reply_box": reply_box,
         }
 
     def _find_lowest_bubble(self, mask, min_w: int, min_h: int):
@@ -274,12 +286,15 @@ class Monitor:
 
             bx, by, bw, bh = bubble
 
-            # Flash box: red around received bubble.
-            # Convert relative (screenshot-local) coords to absolute screen
-            # coords (physical pixels) that the overlay expects.
+            # Flash boxes: red around received bubble, green around reply content (if any).
             abs_x = region["x"] + bx
             abs_y = region["y"] + by
-            self._overlay.show({"x": abs_x, "y": abs_y, "w": bw, "h": bh})
+            reply_region = None
+            rbox = view.get("reply_box")
+            if rbox:
+                rbx, rby, rbw, rbh = rbox
+                reply_region = {"x": region["x"] + rbx, "y": region["y"] + rby, "w": rbw, "h": rbh}
+            self._overlay.show({"x": abs_x, "y": abs_y, "w": bw, "h": bh}, reply_region)
 
             bubble_img = screenshot.crop((bx, by, bx + bw, by + bh))
 
@@ -295,6 +310,12 @@ class Monitor:
             trigger_str = self.config.get_reply("trigger", "@所有人")
             patterns = [p.strip() for p in trigger_str.split(",") if p.strip()] or ["@所有人"]
             if not any(pat in text for pat in patterns):
+                return
+
+            # ── Already-replied check (first pass): skip immediately if pair is visible. ──
+            if view.get("already_replied"):
+                sig = self._bubble_signature(bubble, text)
+                self._inflight.get(name, {}).pop(sig, None)
                 return
 
             # Click the message bubble to focus the chat window and expose any hidden
@@ -315,12 +336,17 @@ class Monitor:
             # Update bubble coords in case the view shifted slightly after click.
             bx, by, bw, bh = new_bubble
 
-            # Update overlay with new bubble position.
+            # Update overlay with new bubble position + reply content.
             abs_x = region["x"] + bx
             abs_y = region["y"] + by
-            self._overlay.show({"x": abs_x, "y": abs_y, "w": bw, "h": bh})
+            reply_region2 = None
+            rbox2 = view.get("reply_box")
+            if rbox2:
+                rbx, rby, rbw, rbh = rbox2
+                reply_region2 = {"x": region["x"] + rbx, "y": region["y"] + rby, "w": rbw, "h": rbh}
+            self._overlay.show({"x": abs_x, "y": abs_y, "w": bw, "h": bh}, reply_region2)
 
-            # ── Already-replied check: is there a reply bubble BELOW this received bubble? ──
+            # ── Already-replied check (second pass): re-check after exposing hidden content. ──
             if view.get("already_replied"):
                 sig = self._bubble_signature(bubble, text)
                 self._inflight.get(name, {}).pop(sig, None)
@@ -410,23 +436,13 @@ class Monitor:
 
     @staticmethod
     def _notify(group_name: str, content: str):
-        """Show a Windows balloon notification after replying."""
-        import subprocess
+        """Show a Windows toast notification after replying."""
         try:
-            subprocess.Popen(
-                [
-                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                    f"Add-Type -AssemblyName System.Windows.Forms; "
-                    f"$n = New-Object System.Windows.Forms.NotifyIcon; "
-                    f"$n.Icon = [System.Drawing.SystemIcons]::Information; "
-                    f"$n.BalloonTipTitle = 'AutoReplyer.Kairl'; "
-                    f"$n.BalloonTipText = '已回复 {group_name}: {content}'; "
-                    f"$n.Visible = $true; "
-                    f"$n.ShowBalloonTip(5000); "
-                    f"Start-Sleep -Seconds 6; "
-                    f"$n.Dispose()"
-                ],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            from winotify import Notification
+            Notification(
+                app_id="AutoReplyer.Kairl",
+                title=f"已回复 {group_name}",
+                msg=content,
+            ).show()
         except Exception:
             pass  # notification is best-effort

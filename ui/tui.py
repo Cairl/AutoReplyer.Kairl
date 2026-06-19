@@ -253,10 +253,14 @@ class TUI:
         lines.append(self._line("", W))
         inner = W - 6
         monitoring_on = self.config.get_monitoring()
+        running = self.monitor.stats.get("running", False)
         if monitoring_on:
-            toggle_text = f"{C.GREEN}开启监控{C.RESET}"
+            if running and self.monitor.stats.get("status") == "启动中":
+                toggle_text = f"{C.YELLOW}启动中{C.RESET}"
+            else:
+                toggle_text = f"{C.GREEN}已启动{C.RESET}"
         else:
-            toggle_text = f"{C.RED}停止监控{C.RESET}"
+            toggle_text = f"{C.RED}已停止{C.RESET}"
         toggle_idx = n_groups + 6  # 0..n_groups-1 groups, n_groups add, n_groups+1..+5 reply
         toggle_sel = self.main_selected == toggle_idx
         tw = get_display_width(toggle_text)

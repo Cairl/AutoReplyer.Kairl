@@ -98,6 +98,7 @@ class RegionOverlay:
         self._root: tk.Tk | None = None
         self._canvas: tk.Canvas | None = None
         self._rect_id = None
+        self._reply_rect_id = None
         self._hide_job = None
         self._vx = 0      # virtual screen origin (physical px)
         self._vy = 0
@@ -120,11 +121,15 @@ class RegionOverlay:
 
     # ── API (called from monitor thread) ──
 
-    def show(self, region: dict):
-        """Briefly flash a red box around the given {x, y, w, h} region."""
+    def show(self, region: dict, reply_region: dict | None = None):
+        """Briefly flash a red box around the given {x, y, w, h} region,
+        and optionally a green box around reply_region."""
         if self._thread is None:
             return
-        self._queue.put({"region": dict(region)})
+        msg = {"region": dict(region)}
+        if reply_region is not None:
+            msg["reply_region"] = dict(reply_region)
+        self._queue.put(msg)
 
     # ── internals ──
 
@@ -192,15 +197,11 @@ class RegionOverlay:
         self._root.after(50, self._drain_queue)
 
     def _draw(self, region: dict):
-        """Draw (or move) the red box around `region`; schedule its hide.
-
-        `region` coordinates are physical pixels (same space as pyautogui
-        screenshots). We translate by the virtual-screen origin so the box is
-        correct even when the target monitor sits at a negative offset.
-        """
+        """Draw red box (received) + optional green box (reply)."""
         if self._canvas is None or self._root is None:
             return
 
+        # --- Received bubble (red #F38B8C, width=3) ---
         x = int(region.get("x", 0)) - self._vx
         y = int(region.get("y", 0)) - self._vy
         w = int(region.get("w", 0))
@@ -216,6 +217,27 @@ class RegionOverlay:
             self._canvas.itemconfig(self._rect_id, state="normal")
             self._canvas.tag_raise(self._rect_id)
 
+        # --- Reply content (green #A6E3A1, width=2) ---
+        reply = region.get("reply_region")
+        if reply is not None:
+            rx = int(reply.get("x", 0)) - self._vx
+            ry = int(reply.get("y", 0)) - self._vy
+            rw = int(reply.get("w", 0))
+            rh = int(reply.get("h", 0))
+            if rw > 0 and rh > 0:
+                rcoords = (rx, ry, rx + rw, ry + rh)
+                if self._reply_rect_id is None:
+                    self._reply_rect_id = self._canvas.create_rectangle(
+                        *rcoords, outline="#A6E3A1", width=2
+                    )
+                else:
+                    self._canvas.coords(self._reply_rect_id, *rcoords)
+                self._canvas.itemconfig(self._reply_rect_id, state="normal")
+                self._canvas.tag_raise(self._reply_rect_id)
+        else:
+            if self._reply_rect_id is not None:
+                self._canvas.itemconfig(self._reply_rect_id, state="hidden")
+
         # Auto-hide
         if self._hide_job is not None:
             try:
@@ -230,4 +252,6 @@ class RegionOverlay:
         if self._canvas is not None:
             if self._rect_id is not None:
                 self._canvas.itemconfig(self._rect_id, state="hidden")
+            if self._reply_rect_id is not None:
+                self._canvas.itemconfig(self._reply_rect_id, state="hidden")
         self._hide_job = None
