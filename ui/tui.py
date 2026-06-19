@@ -455,7 +455,16 @@ class TUI:
         title = f"框选 [{group['name']}] 的{type_name}"
 
         show_cursor()
-        rect = self.selector.select(title=title)
+        # Temporarily show "已停止" during region selection so the overlay
+        # has a clean Tk environment (the monitoring overlay is paused).
+        was_monitoring = self.config.get_monitoring()
+        self.config.data["monitoring"] = False
+        self._last_lines = []
+        self._render()
+        try:
+            rect = self.selector.select(title=title)
+        finally:
+            self.config.data["monitoring"] = was_monitoring
         hide_cursor()
 
         if rect:
