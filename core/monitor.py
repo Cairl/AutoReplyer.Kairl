@@ -337,6 +337,31 @@ class Monitor:
 
         return bubbles
 
+    def _overlay_view(self, region, view):
+        """Build an overlay.show() call from a region + analysis view.
+
+        Merges received bubble + paired green reply into one cyan whole-context
+        box when paired; otherwise a red box around just the received bubble.
+        Returns (region_dict, reply_region_dict|None, paired_bool).
+        """
+        bubble = view.get("bubble")
+        if bubble is None:
+            return None, None, False
+        bx, by, bw, bh = bubble
+        reply_region = None
+        rbox = view.get("reply_box")
+        if rbox:
+            rbx, rby, rbw, rbh = rbox
+            reply_region = {
+                "x": region["x"] + rbx, "y": region["y"] + rby,
+                "w": rbw, "h": rbh,
+            }
+        return (
+            {"x": region["x"] + bx, "y": region["y"] + by, "w": bw, "h": bh},
+            reply_region,
+            view.get("already_replied", False),
+        )
+
     def _scan_group(self, group: dict):
         """Scan one group's latest received bubble for trigger keywords.
 
@@ -346,6 +371,10 @@ class Monitor:
           - that bubble has NO paired green reply bubble on the right half —
             i.e. we haven't already answered it;
           - the message isn't currently in-flight (a reply is queued/rendering).
+
+        Visual feedback is shown ONLY for trigger-relevant messages: a non-trigger
+        received bubble (e.g. someone's chatter + your unrelated reply) never gets
+        outlined, so it isn't mistaken for an active auto-reply context.
 
         Reading "have I replied?" from the screen (rather than from a memory of
         past texts) avoids re-replying to stale on-screen messages and correctly
@@ -365,23 +394,6 @@ class Monitor:
                 return
 
             bx, by, bw, bh = bubble
-
-            # Flash overlay: when a green reply is paired with this received
-            # bubble, draw ONE merged box around both (the whole context pair);
-            # otherwise just outline the received bubble in red.
-            abs_x = region["x"] + bx
-            abs_y = region["y"] + by
-            reply_region = None
-            rbox = view.get("reply_box")
-            if rbox:
-                rbx, rby, rbw, rbh = rbox
-                reply_region = {"x": region["x"] + rbx, "y": region["y"] + rby, "w": rbw, "h": rbh}
-            self._overlay.show(
-                {"x": abs_x, "y": abs_y, "w": bw, "h": bh},
-                reply_region,
-                paired=view.get("already_replied"),
-            )
-
             bubble_img = screenshot.crop((bx, by, bx + bw, by + bh))
 
             result = self._ocr_engine.recognize_pil_sync(bubble_img, "zh-Hans-CN")
@@ -396,9 +408,13 @@ class Monitor:
             trigger_str = self.config.get_reply("trigger", "@所有人")
             patterns = [p.strip() for p in trigger_str.split(",") if p.strip()] or ["@所有人"]
             if not any(pat in text for pat in patterns):
-                return
+                return  # non-trigger message: no overlay, no action
 
-            # ── Already-replied check (first pass): skip immediately if pair is visible. ──
+            # ── Trigger-relevant from here on: show visual feedback. ──
+            # First pass: if already paired with a green reply, flash the merged
+            # cyan whole-context box and skip — we've already answered this one.
+            rgn, rreply, paired = self._overlay_view(region, view)
+            self._overlay.show(rgn, rreply, paired=paired)
             if view.get("already_replied"):
                 sig = self._bubble_signature(bubble, text)
                 self._inflight.get(name, {}).pop(sig, None)
@@ -422,19 +438,9 @@ class Monitor:
             # Update bubble coords in case the view shifted slightly after click.
             bx, by, bw, bh = new_bubble
 
-            # Update overlay with new bubble position + reply content.
-            abs_x = region["x"] + bx
-            abs_y = region["y"] + by
-            reply_region2 = None
-            rbox2 = view.get("reply_box")
-            if rbox2:
-                rbx, rby, rbw, rbh = rbox2
-                reply_region2 = {"x": region["x"] + rbx, "y": region["y"] + rby, "w": rbw, "h": rbh}
-            self._overlay.show(
-                {"x": abs_x, "y": abs_y, "w": bw, "h": bh},
-                reply_region2,
-                paired=view.get("already_replied"),
-            )
+            # Second-pass overlay with the post-click bubble position.
+            rgn2, rreply2, paired2 = self._overlay_view(region, view)
+            self._overlay.show(rgn2, rreply2, paired=paired2)
 
             # ── Already-replied check (second pass): re-check after exposing hidden content. ──
             if view.get("already_replied"):

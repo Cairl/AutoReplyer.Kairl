@@ -20,6 +20,21 @@ The full virtual screen bounding box is queried via the Win32 API
 SM_CYVIRTUALSCREEN) so the overlay spans every monitor (including negative
 offsets for monitors placed to the left/above the primary).
 
+Capture exclusion (anti self-interference)
+------------------------------------------
+The monitor screenshots the same screen the overlay paints on. Without
+protection, the overlay's own box outline (2-3px) lands on top of the bubble's
+edge pixels, and the next screenshot captures the outline instead of the real
+bubble color — so the detected bubble shrinks a little each scan cycle until
+detection fails, then the box vanishes and the bubble "regrows": a visible
+pulsing/shrinking artefact. We mark the overlay window with
+SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) so it stays visible to the
+user but is invisible to BitBlt / PrintWindow / DirectX capture — i.e. to
+pyautogui.screenshot. The screenshot then sees the untouched WeChat bubbles
+and detection stays stable. Requires Windows 10 2004+; on older builds the
+call is a no-op (returns FALSE) and we fall back to a small outward margin
+on the drawn rectangle so its outline sits just outside the bubble.
+
 Design
 ------
   - One borderless, transparent, always-on-top, click-through tkinter window
@@ -86,6 +101,37 @@ def _virtual_screen_rect():
     return 0, 0, None, None  # let caller fall back to tkinter metrics
 
 
+def _exclude_from_capture(root: tk.Tk) -> bool:
+    """Mark the overlay window invisible to screen capture (still user-visible).
+
+    Uses SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE). Returns True if the
+    call succeeded, False otherwise (e.g. older Windows < 2004) so the caller
+    can fall back to drawing rectangles with a small outward margin.
+
+    Requires the HWND of the top-level window. For a tkinter Tk() with
+    overrideredirect(True), winfo_id() returns the child window; the real
+    top-level is its parent (or itself if there is no parent).
+    """
+    try:
+        user32 = ctypes.windll.user32
+        # Set argtypes so a 64-bit HWND isn't truncated to a 32-bit int.
+        user32.SetWindowDisplayAffinity.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint,
+        ]
+        user32.SetWindowDisplayAffinity.restype = ctypes.c_int
+        root.update_idletasks()
+        hwnd = root.winfo_id()
+        # Walk up to the real top-level window (tkinter wraps a child inside it).
+        parent = user32.GetParent(hwnd)
+        if parent:
+            hwnd = parent
+        WDA_EXCLUDEFROMCAPTURE = 0x11
+        ok = user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+        return bool(ok)
+    except Exception:
+        return False
+
+
 class RegionOverlay:
     """Click-through red rectangle overlay driven by a poller thread."""
 
@@ -102,6 +148,7 @@ class RegionOverlay:
         self._hide_job = None
         self._vx = 0      # virtual screen origin (physical px)
         self._vy = 0
+        self._capture_excluded = False  # set in _build_window
 
     # ── lifecycle (called from main thread) ──
 
@@ -186,6 +233,16 @@ class RegionOverlay:
         canvas.pack(fill="both", expand=True)
         self._canvas = canvas
 
+        # Make the overlay invisible to screen capture (BitBlt / PrintWindow /
+        # DirectX) while still visible to the user. This is the key fix for the
+        # "shrinking box" artefact: without it, the overlay's own outline sits
+        # on the bubble's edge pixels and gets photographed by the next
+        # pyautogui.screenshot, so the detected bubble shrinks each scan cycle
+        # until detection fails. With capture exclusion the screenshot sees the
+        # untouched bubbles and detection stays stable.
+        # WDA_EXCLUDEFROMCAPTURE = 0x11 (Windows 10 2004+, no-op on older).
+        self._capture_excluded = _exclude_from_capture(root)
+
     def _drain_queue(self):
         """Process pending show/stop requests, then reschedule."""
         if self._root is None:
@@ -214,6 +271,14 @@ class RegionOverlay:
           of region and reply_region (the whole received+reply context pair).
         - otherwise: red box around region, plus a green box around
           reply_region when it is present.
+
+        When the window could NOT be excluded from screen capture (older
+        Windows), every rectangle is drawn with a small outward margin so its
+        outline sits just outside the bubble instead of on the bubble's edge
+        pixels — this keeps the outline from being photographed back into the
+        next screenshot and eroding the detected bubble (the "shrinking box"
+        artefact). When capture exclusion IS active, no margin is needed and
+        boxes are drawn exactly on the detected region.
         """
         if self._canvas is None or self._root is None:
             return
@@ -221,6 +286,10 @@ class RegionOverlay:
         region = payload.get("region", {}) or {}
         reply = payload.get("reply_region")
         paired = payload.get("paired", False)
+
+        # Margin applied outward when capture-exclusion failed, so the outline
+        # doesn't overwrite bubble edge pixels that the next screenshot reads.
+        margin = 0 if self._capture_excluded else 3
 
         # Convert physical-pixel screen coords → canvas coords (subtract the
         # virtual-screen origin so monitors left/above the primary still work).
@@ -238,11 +307,12 @@ class RegionOverlay:
             rpw = int(reply.get("w", 0))
             rph = int(reply.get("h", 0))
             if rw > 0 and rh > 0 and rpw > 0 and rph > 0:
-                union_x = min(rx_scr, rpx_scr) - self._vx
-                union_y = min(ry_scr, rpy_scr) - self._vy
-                union_w = max(rx_scr + rw, rpx_scr + rpw) - min(rx_scr, rpx_scr)
-                union_h = max(ry_scr + rh, rpy_scr + rph) - min(ry_scr, rpy_scr)
-                coords = (union_x, union_y, union_x + union_w, union_y + union_h)
+                ux = min(rx_scr, rpx_scr) - margin
+                uy = min(ry_scr, rpy_scr) - margin
+                ux2 = max(rx_scr + rw, rpx_scr + rpw) + margin
+                uy2 = max(ry_scr + rh, rpy_scr + rph) + margin
+                coords = (ux - self._vx, uy - self._vy,
+                          ux2 - self._vx, uy2 - self._vy)
                 if self._rect_id is None:
                     self._rect_id = self._canvas.create_rectangle(
                         *coords, outline="#8CDEF6", width=3
@@ -259,9 +329,9 @@ class RegionOverlay:
         else:
             # ── Received bubble (red #F38B8C, width=3) ──
             if rw > 0 and rh > 0:
-                x = rx_scr - self._vx
-                y = ry_scr - self._vy
-                coords = (x, y, x + rw, y + rh)
+                x = rx_scr - margin - self._vx
+                y = ry_scr - margin - self._vy
+                coords = (x, y, x + rw + 2 * margin, y + rh + 2 * margin)
                 if self._rect_id is None:
                     self._rect_id = self._canvas.create_rectangle(
                         *coords, outline="#F38B8C", width=3
@@ -275,10 +345,10 @@ class RegionOverlay:
 
             # ── Reply content (green #A6E3A1, width=2) ──
             if reply is not None:
-                rrx = int(reply.get("x", 0)) - self._vx
-                rry = int(reply.get("y", 0)) - self._vy
-                rrw = int(reply.get("w", 0))
-                rrh = int(reply.get("h", 0))
+                rrx = int(reply.get("x", 0)) - margin - self._vx
+                rry = int(reply.get("y", 0)) - margin - self._vy
+                rrw = int(reply.get("w", 0)) + 2 * margin
+                rrh = int(reply.get("h", 0)) + 2 * margin
                 if rrw > 0 and rrh > 0:
                     rcoords = (rrx, rry, rrx + rrw, rry + rrh)
                     if self._reply_rect_id is None:
