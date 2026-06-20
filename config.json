@@ -1,8 +1,8 @@
 {
   "reply": {
     "content": "2",
-    "delay_min": 0.0,
-    "delay_max": 0.0,
+    "delay_min": 3.0,
+    "delay_max": 3.0,
     "scan_interval": 0.1,
     "trigger": "@所有人"
   },
@@ -11,19 +11,19 @@
       "name": "群 1",
       "enabled": true,
       "message_region": {
-        "x": 31,
-        "y": 219,
-        "w": 602,
-        "h": 1273
+        "x": 16,
+        "y": 84,
+        "w": 589,
+        "h": 1479
       },
       "reply_region": {
-        "x": 47,
-        "y": 1527,
-        "w": 579,
-        "h": 360
+        "x": 35,
+        "y": 1604,
+        "w": 561,
+        "h": 373
       }
     }
   ],
-  "monitoring": true,
+  "monitoring": false,
   "gpu_acceleration": true
 }

@@ -11,7 +11,7 @@ from pathlib import Path
 CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 
 DEFAULT_CONFIG = {
-    "monitoring": True,        # global monitoring on/off (persists across restarts)
+    "monitoring": False,       # global monitoring on/off — defaults off on startup
     "gpu_acceleration": True,  # use GPU (CuPy) for image array operations when available
     "reply": {
         "trigger": "@所有人",

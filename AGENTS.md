@@ -64,6 +64,7 @@ pip install pyautogui pillow numpy pywin32 winocr PySide6 winotify
 - Atomic config writes: temp file + os.replace prevents corruption
 - Auto-named groups: "群 1", "群 2", etc. — no manual naming needed
 - Startup delay: 3-second no-scan window on launch, TUI shows yellow "启动中"
+- Edit-mode input uses `msvcrt.getch()` (raw bytes), not `getwch()` — `getwch` merges `\xe0` + scan_code into a single character under CP936/GBK, making extended keys undetectable. GBK double-byte lead bytes (0x81-0xFE) in the printable path are decoded by reading a second `getch()` and combining.
 
 ## TUI Navigation
 
@@ -71,4 +72,4 @@ pip install pyautogui pillow numpy pywin32 winocr PySide6 winotify
 - Reply settings: Enter to edit inline, Enter to confirm, Esc to cancel
 - Groups: Enter to open action sub-menu (select regions, delete)
 - Group actions: [选择消息位置] [选择输入位置] [删除] — Left/Right to switch, Enter to execute
-- Bottom row: monitoring toggle — Enter switches 已启动/已停止, Esc exits app
+- 运行状态行: 位于硬件加速下方 — Enter 切换 已启动/未启动，每次启动默认未启动
