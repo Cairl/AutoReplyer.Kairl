@@ -172,10 +172,14 @@ class Monitor:
              already-answered @all never re-triggers just because other messages
              landed in between.
           4. The lowest received bubble is "already replied" iff it has a pair.
+          5. has_content_below: if there's any received-color content below the
+             lowest bubble (someone else's reply that was too small to be detected
+             as a full bubble, e.g. a single "2"), treat it as already replied.
 
         Returns a dict:
           {"bubble": (x,y,w,h)|None, "bubble_bottom": int|None,
-           "already_replied": bool, "reply_box": (x,y,w,h)|None}
+           "already_replied": bool, "reply_box": (x,y,w,h)|None,
+           "has_content_below": bool}
         """
         # Pillow.screenshot → CPU numpy array.
         img_cpu = numpy.array(screenshot.convert("RGB"))
@@ -241,11 +245,25 @@ class Monitor:
         already_replied = lowest_idx in pairs
         reply_box = pairs.get(lowest_idx)
 
+        # ── has_content_below: detect someone else's reply below the trigger ──
+        # The bubble detection (min_w=40) may miss small replies like a single
+        # "2". If there's any received-color content below the lowest detected
+        # bubble, someone else has likely replied — treat as already replied.
+        # Threshold: 500px is well above noise (<100) but catches a small bubble
+        # (~50×40 × 0.5 fill ≈ 1000px).
+        has_content_below = False
+        if bubble:
+            below_y = bubble[1] + bubble[3]
+            if below_y < h:
+                below_recv = recv_mask[below_y:, :w // 2]
+                has_content_below = int(below_recv.sum()) > 500
+
         return {
             "bubble": bubble,
             "bubble_bottom": bubble_bottom,
             "already_replied": already_replied,
             "reply_box": reply_box,
+            "has_content_below": has_content_below,
         }
 
     def _find_lowest_bubble(self, mask, min_w: int, min_h: int):
@@ -370,6 +388,8 @@ class Monitor:
         A trigger fires ONLY when ALL hold:
           - the lowest bottom-left received bubble is found;
           - its OCR text contains a trigger keyword;
+          - there's no received-color content below the trigger bubble
+            (someone else hasn't already replied with a small bubble);
           - that bubble has NO paired green reply bubble on the right half —
             i.e. we haven't already answered it;
           - the message isn't currently in-flight (a reply is queued/rendering).
@@ -399,14 +419,19 @@ class Monitor:
             bubble_img = screenshot.crop((bx, by, bx + bw, by + bh))
 
             result = self._ocr_engine.recognize_pil_sync(bubble_img, "zh-Hans-CN")
-            # winocr returns a dict. The top-level "text" field joins all lines
-            # with spaces — line breaks are lost. To preserve the original
-            # multi-line shape for display, extract each line's text from the
-            # "lines" list and join with "\n".
+            # winocr returns a dict (via picklify). The `text` field joins all
+            # recognized lines with SPACES for Chinese (e.g. "@所有人 编 号 611"),
+            # which destroys line structure. Use `lines` to preserve real line
+            # breaks for display; fall back to `text` if `lines` is unavailable.
             if isinstance(result, dict):
-                line_items = result.get("lines") or []
-                line_texts = [ln.get("text", "") if isinstance(ln, dict) else "" for ln in line_items]
-                raw_text = "\n".join(line_texts)
+                ocr_lines = result.get("lines") or []
+                if ocr_lines:
+                    raw_text = "\n".join(
+                        ln.get("text", "") if isinstance(ln, dict) else getattr(ln, "text", "")
+                        for ln in ocr_lines
+                    )
+                else:
+                    raw_text = result.get("text", "")
             else:
                 raw_text = getattr(result, "text", "")
             raw_text = (raw_text or "").strip()
@@ -414,17 +439,12 @@ class Monitor:
             if not raw_text:
                 return
 
-            # 保存原始 OCR 文本（保留换行）供 TUI 显示。
-            # 行内的中文字符间空格（如 "@ 所有人"）保留原样显示，让用户看到
-            # OCR 的真实输出；匹配时才去除所有空白。
+            # 保存 OCR 文本供 TUI 显示（保留原始空格，让你看到真实识别结果）
             self.stats["last_ocr_raw"] = raw_text
 
             # Windows OCR 会在中文字符之间插入大量空格（如 "@ 所有人"），
-            # 这些空格是识别噪声。去除所有空白后匹配，正则才能正确命中。
-            # 同时把 OCR 常见的误识别字符归一化：
-            #   "一" (U+4E00) ← 连字符 "-" 在中文上下文被误识别
+            # 这些空格是识别噪声。匹配时去除所有空白，正则才能正确命中。
             text = re.sub(r"\s+", "", raw_text)
-            text = text.replace("一", "-")
 
             trigger_str = self.config.get_reply("trigger", "@所有人")
             # 检测内容始终按正则表达式处理。非法正则静默跳过，不触发。
@@ -433,6 +453,16 @@ class Monitor:
                     return
             except re.error:
                 return  # non-trigger message: no overlay, no action
+
+            # ── Someone else has replied: received-color content below the trigger ──
+            # A small reply bubble (e.g. a single "2") may not meet the bubble
+            # detection threshold (min_w=40), so it won't be paired as a green
+            # reply. But its received-color pixels are still present below the
+            # trigger. If detected, someone else already replied — don't fire.
+            if view.get("has_content_below"):
+                sig = self._bubble_signature(bubble, text)
+                self._inflight.get(name, {}).pop(sig, None)
+                return
 
             # ── Trigger-relevant from here on: show visual feedback. ──
             # First pass: if already paired with a green reply, flash the merged
@@ -470,7 +500,9 @@ class Monitor:
             self._overlay.show(rgn2, rreply2, paired=paired2)
 
             # ── Already-replied check (second pass): re-check after exposing hidden content. ──
-            if view.get("already_replied"):
+            # Also re-check has_content_below: the click may have scrolled a small
+            # reply bubble into view.
+            if view.get("already_replied") or view.get("has_content_below"):
                 sig = self._bubble_signature(bubble, text)
                 self._inflight.get(name, {}).pop(sig, None)
                 return
@@ -480,8 +512,10 @@ class Monitor:
             now = time.time()
             inflight = self._inflight.setdefault(name, {})
 
-            # Clean expired entries from inflight.
-            inflight.pop(next((k for k, exp in list(inflight.items()) if exp <= now), None), None)
+            # Clean ALL expired entries from inflight (not just one per scan).
+            for k in list(inflight.keys()):
+                if inflight[k] <= now:
+                    del inflight[k]
 
             if sig in inflight:
                 return  # reply already queued/rendering for this message

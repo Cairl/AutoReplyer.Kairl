@@ -49,8 +49,8 @@ pip install pyautogui pillow numpy cupy-cuda12x pywin32 winocr PySide6 winotify
 2. **TUI Configuration** — Main menu with Reply Settings and Group Settings
 3. **Region Selection** — PySide6 QDialog full-screen overlay with dark mask + white border + crosshair + confirm/cancel toolbar, DPI-aware via `devicePixelRatio()`
 4. **Monitoring** — Background thread with 3-second startup delay. Captures the message region, locates the bottom-left chat bubble by color (#2F2F30 night / #EEEEF0 day), clicks the bubble to expose hidden content, OCR-scans the latest received bubble for trigger keywords.
-5. **Trigger Matching** — Detection content is treated as a regex pattern. OCR text is normalized (all whitespace removed, `一`→`-` for misrecognized hyphens) before `re.search()`. Invalid regex silently skips.
-6. **Pair Detection** — Screenshots the right-half area below the received bubble, computes `np.std()`: high variance = reply content exists below = already replied → skip; low variance = no reply → trigger.
+5. **Trigger Matching** — Detection content is treated as a regex pattern. OCR text is normalized via `re.sub(r"\s+", "", text)` (strips all whitespace, including the spurious spaces winocr inserts between Chinese characters) before `re.search()`. Invalid regex silently skips.
+6. **Pair Detection** — Color-matches received bubbles (#2F2F30 night / #EEEEF0 day, left half) and self-sent green replies (#9DF29F light / #35D28D dark, right half), greedily pairs each received bubble with the nearest green reply at/after it and before the next received bubble. The lowest received bubble is "already replied" iff it has a pair. Additionally checks `has_content_below`: any received-color pixels below the lowest bubble (someone else's small reply that didn't meet bubble-detection threshold) also counts as already replied.
 7. **Auto-Reply** — Clipboard paste via `win32clipboard`, Ctrl+V + Enter. Random delay (delay_min ~ delay_max). In-flight guard (bubble signature) prevents duplicate firing during reply render window.
 8. **Visual Overlay** — Red rectangle around received bubble, green rectangle around reply content (if detected). Click-through tkinter window, 0.5s hold.
 9. **Notification** — Windows toast via `winotify` with AUMID shortcut auto-registration on first use.
@@ -64,15 +64,13 @@ pip install pyautogui pillow numpy cupy-cuda12x pywin32 winocr PySide6 winotify
 - Config hot-reload: monitor reads config.json changes without restart
 - Per-group regions: each group has independent message_area and reply_area coordinates
 - Bubble-color detection: matches #2F2F30 (night) or #EEEEF0 (day) in the left half
-- Pair-detection "already replied" check: `np.std()` on receiver bubble's below-right area → no green-color dependency, survives restarts, handles obscured content
-- In-flight guard: `MD5(row|w|h|text)` signature with `delay_max + 5s` expiry per group
+- Pair-detection "already replied" check: color-match received bubbles (left half) + green reply bubbles (right half), greedily pair each received with nearest green reply at/after it and before next received; lowest received bubble is "already replied" iff paired. `has_content_below` catches someone else's small reply (received-color pixels below the lowest bubble that didn't meet bubble-detection threshold).
+- In-flight guard: `MD5(row|w|h|text)` signature with `delay_max + 5s` expiry per group; cleans ALL expired entries each scan (not just one)
 - Click-to-expose: keyword match clicks the bubble, re-screenshots, re-analyzes pair before replying
 - No persistent history: pure screen-based detection, zero disk state beyond config.json
 - Atomic config writes: temp file + os.replace prevents corruption
 - Auto-named groups: "群 1", "群 2", etc. — no manual naming needed
 - Startup delay: 3-second no-scan window on launch, TUI shows yellow "启动中"
-- OCR line extraction: reads `result["lines"]` (per-line `text`) and joins with `\n` to preserve line breaks for display; top-level `result["text"]` joins all lines with spaces and loses breaks
-- OCR normalization: Windows OCR inserts spaces between CJK chars and misrecognizes `-` as `一`; matching text strips all whitespace and maps `一`→`-`
 - Edit-mode input uses `msvcrt.getch()` (raw bytes), not `getwch()` — `getwch` merges `\xe0` + scan_code into a single character under CP936/GBK, making extended keys undetectable. GBK double-byte lead bytes (0x81-0xFE) in the printable path are decoded by reading a second `getch()` and combining.
 
 ## TUI Navigation

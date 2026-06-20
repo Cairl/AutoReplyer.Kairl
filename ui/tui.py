@@ -175,8 +175,7 @@ class TUI:
         else:
             run_text = "未启动"
             run_color = C.RED
-        run_status_str = f"{C.LABEL}运行状态:{C.RESET} {run_color}{run_text}{C.RESET}"
-        items.append((run_status_str, True))
+        items.append((f"{C.LABEL}运行状态:{C.RESET} {run_color}{run_text}{C.RESET}", True))
 
         # Groups (selectable indices 1 .. n_groups).
         group_render_data = []  # (name_str, opt_str); opt_str empty for non-focused
