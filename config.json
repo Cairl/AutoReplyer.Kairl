@@ -1,0 +1,29 @@
+{
+  "reply": {
+    "content": "2",
+    "delay_min": 0.0,
+    "delay_max": 0.0,
+    "scan_interval": 0.1,
+    "trigger": "^@所有人(?:(?!单转)[\\s\\S])*接单人$"
+  },
+  "groups": [
+    {
+      "name": "群 1",
+      "enabled": true,
+      "message_region": {
+        "x": 9,
+        "y": 139,
+        "w": 603,
+        "h": 1438
+      },
+      "reply_region": {
+        "x": 30,
+        "y": 1607,
+        "w": 554,
+        "h": 382
+      }
+    }
+  ],
+  "monitoring": false,
+  "gpu_acceleration": true
+}

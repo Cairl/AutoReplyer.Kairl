@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.vscode/
+.idea/
+dist/
+build/
+*.spec
+venv/
+run_sync.bat

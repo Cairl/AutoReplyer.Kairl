@@ -1,0 +1,8 @@
+pyautogui
+pillow
+numpy
+pywin32
+winocr
+PySide6
+winotify
+cupy-cuda12x
