@@ -1,8 +1,13 @@
 """
-AutoReplyer.Kairl
+WeAutoReplyer
 WeChat Group @all Auto-Reply Tool
 Console TUI with OCR-based screen monitoring
 """
+
+# Enforce single instance first: terminate any previous instance before
+# initializing anything else (DPI, GUI, monitor).
+from core.single_instance import claim_single_instance
+claim_single_instance()
 
 # Mark the process DPI-aware BEFORE any GUI/tkinter import, so every window
 # (region selector, overlay) uses physical-pixel geometry that matches

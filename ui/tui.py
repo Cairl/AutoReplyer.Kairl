@@ -15,7 +15,7 @@ from ui.ui import (
 from core.config import Config
 from core.monitor import Monitor
 from core.region import RegionSelector
-from core.gpu import gpu_available, cupy_available, gpu_fallback_reason
+from core.gpu import gpu_available, cupy_available
 
 
 class TUI:
@@ -142,15 +142,11 @@ class TUI:
         return f"{C.GRAY}{BL}{H * (W - 2)}{BR}{C.RESET}"
 
     def _gpu_status_str(self) -> str:
-        """GPU acceleration status line (informational, not selectable)."""
+        """GPU acceleration status: only two states — enabled or disabled."""
         gpu_accel_config = self.config.get_gpu_acceleration()
-        if not gpu_available:
-            return f"{C.LABEL}硬件加速:{C.RESET} {C.GRAY}未检测到{C.RESET}"
-        if not gpu_accel_config:
-            return f"{C.LABEL}硬件加速:{C.RESET} {C.RED}已禁用{C.RESET}"
-        if not cupy_available:
-            return f"{C.LABEL}硬件加速:{C.RESET} {C.YELLOW}已回退 CPU ({gpu_fallback_reason}){C.RESET}"
-        return f"{C.LABEL}硬件加速:{C.RESET} {C.GREEN}已启用{C.RESET}"
+        if gpu_available and cupy_available and gpu_accel_config:
+            return f"{C.LABEL}硬件加速:{C.RESET} {C.GREEN}已启用{C.RESET}"
+        return f"{C.LABEL}硬件加速:{C.RESET} {C.GRAY}未启用{C.RESET}"
 
     # ═══════════════════════════════════════════════════════════
     #  Main Panel
@@ -227,19 +223,28 @@ class TUI:
             else:
                 items.append((f"{C.LABEL}{label}:{C.RESET} {C.WHITE}{value}{C.RESET}", True))
 
+        # ── Prepare OCR display lines (for width calc + render) ──
+        ocr_raw = s.get('last_ocr_raw', 'N/A')
+        # splitlines() handles \n, \r\n, \r — preserves the original line shape.
+        ocr_lines = ocr_raw.splitlines() if ocr_raw and ocr_raw != 'N/A' else ['N/A']
+
         # ── Calculate W ──
         max_w = max(get_display_width(c) for c, _ in items)
         max_w = max(max_w, get_display_width("回复设置") + 10)
         max_w = max(max_w, get_display_width("群设置") + 10)
+        max_w = max(max_w, get_display_width("识别内容") + 10)
         # Ensure width accommodates focused group's button group (1 space between name and buttons)
         button_group_w = sum(get_display_width(opt) + 2 for opt in self._group_opts)
         max_name_w = max((get_display_width(g['name']) for g in groups), default=0)
         max_w = max(max_w, max_name_w + button_group_w)
+        # Ensure width accommodates OCR text lines
+        for ol in ocr_lines:
+            max_w = max(max_w, get_display_width(ol))
         W = max_w + 6
 
         # ── Render ──
         lines = []
-        lines.append(self._top_border("AutoReplyer.Kairl", W))
+        lines.append(self._top_border("WeAutoReplyer", W))
 
         # Stats (not selectable)
         lines.append(self._line(items[0][0], W))
@@ -270,7 +275,7 @@ class TUI:
                 lines.append(f"{C.GRAY}{V}  {content} {C.GRAY}{V}{C.RESET}")
 
         # Add group
-        c, _ = items[3 + n_groups]  # 1 stat + 1 gpu + 1 run_status + n_groups groups
+        c, _ = items[3 + n_groups]  # stat + gpu + run_status + n_groups groups
         sel = self.main_selected == n_groups + 1
         if sel:
             inner = W - 6
@@ -281,9 +286,14 @@ class TUI:
         # Reply settings
         lines.append(self._divider("回复设置", W))
         for i in range(5):
-            c, _ = items[4 + n_groups + i]  # 1 stat + 1 gpu + 1 run_status + n_groups groups + 1 add
+            c, _ = items[4 + n_groups + i]  # stat + gpu + run_status + n_groups groups + 1 add
             sel = (n_groups + 2 + i) == self.main_selected
             lines.append(self._line_sel(c, W) if sel else self._line(c, W))
+
+        # 识别内容 (OCR raw text, multi-line, not selectable)
+        lines.append(self._divider("识别内容", W))
+        for ol in ocr_lines:
+            lines.append(self._line(f"{C.WHITE}{ol}{C.RESET}", W))
 
         lines.append(self._bottom_border(W))
         return lines

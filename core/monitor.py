@@ -21,6 +21,7 @@ Detection logic:
 import time
 import threading
 import hashlib
+import re
 from datetime import datetime
 
 import pyautogui
@@ -78,6 +79,7 @@ class Monitor:
             "replies": 0,
             "errors": 0,
             "last_trigger": "N/A",
+            "last_ocr_raw": "N/A",
             "reply_elapsed": None,
             "status": "空闲"
         }
@@ -397,17 +399,39 @@ class Monitor:
             bubble_img = screenshot.crop((bx, by, bx + bw, by + bh))
 
             result = self._ocr_engine.recognize_pil_sync(bubble_img, "zh-Hans-CN")
-            # winocr returns a dict, not an object — use .get() not getattr()
-            text = result.get("text", "") if isinstance(result, dict) else getattr(result, "text", "")
-            text = (text or "").strip()
-            text = " ".join(text.split())
+            # winocr returns a dict. The top-level "text" field joins all lines
+            # with spaces — line breaks are lost. To preserve the original
+            # multi-line shape for display, extract each line's text from the
+            # "lines" list and join with "\n".
+            if isinstance(result, dict):
+                line_items = result.get("lines") or []
+                line_texts = [ln.get("text", "") if isinstance(ln, dict) else "" for ln in line_items]
+                raw_text = "\n".join(line_texts)
+            else:
+                raw_text = getattr(result, "text", "")
+            raw_text = (raw_text or "").strip()
 
-            if not text:
+            if not raw_text:
                 return
 
+            # 保存原始 OCR 文本（保留换行）供 TUI 显示。
+            # 行内的中文字符间空格（如 "@ 所有人"）保留原样显示，让用户看到
+            # OCR 的真实输出；匹配时才去除所有空白。
+            self.stats["last_ocr_raw"] = raw_text
+
+            # Windows OCR 会在中文字符之间插入大量空格（如 "@ 所有人"），
+            # 这些空格是识别噪声。去除所有空白后匹配，正则才能正确命中。
+            # 同时把 OCR 常见的误识别字符归一化：
+            #   "一" (U+4E00) ← 连字符 "-" 在中文上下文被误识别
+            text = re.sub(r"\s+", "", raw_text)
+            text = text.replace("一", "-")
+
             trigger_str = self.config.get_reply("trigger", "@所有人")
-            patterns = [p.strip() for p in trigger_str.split(",") if p.strip()] or ["@所有人"]
-            if not any(pat in text for pat in patterns):
+            # 检测内容始终按正则表达式处理。非法正则静默跳过，不触发。
+            try:
+                if not re.search(trigger_str, text):
+                    return
+            except re.error:
                 return  # non-trigger message: no overlay, no action
 
             # ── Trigger-relevant from here on: show visual feedback. ──
@@ -542,8 +566,8 @@ class Monitor:
             # winotify requires a Start Menu shortcut with matching app_id.
             # Create one on first use if it doesn't exist.
             appdata = os.environ.get("APPDATA", "")
-            lnk_dir = os.path.join(appdata, r"Microsoft\Windows\Start Menu\Programs\AutoReplyer")
-            lnk_path = os.path.join(lnk_dir, "AutoReplyer.Kairl.lnk")
+            lnk_dir = os.path.join(appdata, r"Microsoft\Windows\Start Menu\Programs\WeAutoReplyer")
+            lnk_path = os.path.join(lnk_dir, "WeAutoReplyer.lnk")
             if not os.path.exists(lnk_path):
                 os.makedirs(lnk_dir, exist_ok=True)
                 from win32com.client import Dispatch
@@ -554,7 +578,7 @@ class Monitor:
 
             from winotify import Notification
             Notification(
-                app_id="AutoReplyer.Kairl",
+                app_id="WeAutoReplyer",
                 title=f"已回复 {group_name}",
                 msg=content,
             ).show()
